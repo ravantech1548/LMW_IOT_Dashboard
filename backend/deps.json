@@ -1,0 +1,212 @@
+[
+  {
+    "id": 4,
+    "name": "Switch",
+    "unit": "State",
+    "widget_type": "on_off_card"
+  },
+  {
+    "id": 1,
+    "name": "Temperature",
+    "unit": "°C",
+    "widget_type": "gauge"
+  },
+  {
+    "id": 2,
+    "name": "Humidity",
+    "unit": "%",
+    "widget_type": "gauge"
+  },
+  {
+    "id": 3,
+    "name": "Pressure",
+    "unit": "hPa",
+    "widget_type": "gauge"
+  },
+  {
+    "id": 5,
+    "name": "Toggle",
+    "unit": "State",
+    "widget_type": "line_chart"
+  },
+  {
+    "id": 11,
+    "name": "Temperature - Celsius",
+    "unit": "C",
+    "widget_type": "numeric_card"
+  },
+  {
+    "id": 12,
+    "name": "Air Flow Meter - CFM",
+    "unit": "CFM",
+    "widget_type": "numeric_card"
+  },
+  {
+    "id": 13,
+    "name": "Air Flow Meter - LPM",
+    "unit": "LPM",
+    "widget_type": "numeric_card"
+  },
+  {
+    "id": 19,
+    "name": "EFF",
+    "unit": "%",
+    "widget_type": "gauge"
+  },
+  {
+    "id": 22,
+    "name": "Downtime Ratio",
+    "unit": "%",
+    "widget_type": "gauge"
+  },
+  {
+    "id": 16,
+    "name": "Kilogram",
+    "unit": "Kg",
+    "widget_type": "gauge"
+  },
+  {
+    "id": 21,
+    "name": "Break",
+    "unit": "Count",
+    "widget_type": "numeric_card"
+  },
+  {
+    "id": 23,
+    "name": "Electrical Fault",
+    "unit": "Counter",
+    "widget_type": "numeric_card"
+  },
+  {
+    "id": 24,
+    "name": "Mechanical Fault",
+    "unit": "Counter",
+    "widget_type": "numeric_card"
+  },
+  {
+    "id": 14,
+    "name": "Shift",
+    "unit": "Numbers",
+    "widget_type": "numeric_card"
+  },
+  {
+    "id": 15,
+    "name": "Length",
+    "unit": "Meters",
+    "widget_type": "numeric_card"
+  },
+  {
+    "id": 28,
+    "name": "Kgs",
+    "unit": "kgs",
+    "widget_type": "numeric_card"
+  },
+  {
+    "id": 17,
+    "name": "Hour",
+    "unit": "Total running Hours",
+    "widget_type": "numeric_card"
+  },
+  {
+    "id": 18,
+    "name": "Minutes",
+    "unit": "Total running Minutes",
+    "widget_type": "numeric_card"
+  },
+  {
+    "id": 35,
+    "name": "EFF%",
+    "unit": "Percentage (2 decimal accuracy)",
+    "widget_type": "gauge"
+  },
+  {
+    "id": 20,
+    "name": "CAN",
+    "unit": "Counter",
+    "widget_type": "numeric_card"
+  },
+  {
+    "id": 37,
+    "name": "BREAK",
+    "unit": "Counter",
+    "widget_type": "numeric_card"
+  },
+  {
+    "id": 38,
+    "name": "D%",
+    "unit": "Percentage (2 decimal accuracy)",
+    "widget_type": "gauge"
+  },
+  {
+    "id": 39,
+    "name": "E-FAULT",
+    "unit": "Counter",
+    "widget_type": "numeric_card"
+  },
+  {
+    "id": 40,
+    "name": "M-FAULT",
+    "unit": "Counter",
+    "widget_type": "numeric_card"
+  },
+  {
+    "id": 25,
+    "name": "Reserved",
+    "unit": "-",
+    "widget_type": "numeric_card"
+  },
+  {
+    "id": 87,
+    "name": "Energy Meter - Voltage Y-B",
+    "unit": "Vyb",
+    "widget_type": "numeric_card"
+  },
+  {
+    "id": 6,
+    "name": "Energy Meter - Voltage R-Y",
+    "unit": "Vry",
+    "widget_type": "numeric_card"
+  },
+  {
+    "id": 88,
+    "name": "Energy Meter - Voltage B-R",
+    "unit": "Vbr",
+    "widget_type": "numeric_card"
+  },
+  {
+    "id": 7,
+    "name": "Energy Meter - Current R",
+    "unit": "rA",
+    "widget_type": "numeric_card"
+  },
+  {
+    "id": 89,
+    "name": "Energy Meter - Current Y",
+    "unit": "yA",
+    "widget_type": "numeric_card"
+  },
+  {
+    "id": 90,
+    "name": "Energy Meter - Current B",
+    "unit": "bA",
+    "widget_type": "numeric_card"
+  },
+  {
+    "id": 8,
+    "name": "Energy Meter - Frequency",
+    "unit": "Hz",
+    "widget_type": "numeric_card"
+  },
+  {
+    "id": 9,
+    "name": "Energy Meter - Power Factor",
+    "unit": "PF",
+    "widget_type": "numeric_card"
+  },
+  {
+    "id": 10,
+    "name": "Energy Meter - Energy",
+    "unit": "kWh",
+    "widget_type": "numeric_card"
+  }
+]

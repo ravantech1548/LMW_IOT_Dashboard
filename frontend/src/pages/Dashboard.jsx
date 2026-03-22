@@ -10,6 +10,8 @@ const Dashboard = () => {
   const { user } = useAuth();
   const [sensors, setSensors] = useState([]);
   const [switchSensors, setSwitchSensors] = useState([]); // Switch sensors for status cards
+  const [devices, setDevices] = useState([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState('');
   const [activeSensorId, setActiveSensorId] = useState(null);
   const [selectedSensor, setSelectedSensor] = useState(null);
   const [sensorData, setSensorData] = useState([]);
@@ -329,44 +331,54 @@ const Dashboard = () => {
     });
   };
 
+  useEffect(() => {
+    if (sensors.length === 0) return;
+
+    // Extract unique device IDs
+    const uniqueDeviceIds = [...new Set(sensors.map(s => s.device_id).filter(id => id))];
+    setDevices(uniqueDeviceIds);
+
+    let currentDevice = selectedDeviceId;
+    if (!currentDevice && uniqueDeviceIds.length > 0) {
+      currentDevice = uniqueDeviceIds[0];
+      setSelectedDeviceId(currentDevice);
+    }
+
+    // Process switch sensors for the selected device
+    const switchSens = sensors
+      .filter(s => s.status === 'active' && s.name !== 'Reserved' && (!currentDevice || s.device_id === currentDevice))
+      .sort((a, b) => {
+        return (a.name || '').localeCompare(b.name || '', undefined, { numeric: true, sensitivity: 'base' });
+      })
+      .map(s => ({
+        ...s,
+        id: s.id,
+        name: s.name,
+        nameLower: s.name.toLowerCase(),
+        location: s.location_name || 'Unknown',
+        type: s.sensor_type || 'Unknown',
+        widget_type: s.widget_type || 'on_off_card',
+        unit: s.unit || '',
+        isActive: false,
+        value: 0
+      }));
+
+    setSwitchSensors(switchSens);
+    switchSensorsRef.current = switchSens;
+
+    if (switchSens.length > 0) {
+      fetchLatestSensorData(switchSens);
+      setSelectedSensor(switchSens[0]);
+    } else {
+      setSelectedSensor(null);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sensors, selectedDeviceId]);
+
   const fetchSensors = async () => {
     try {
       const response = await api.get('/sensors');
       setSensors(response.data);
-
-      // Filter for Switch type sensors dynamically based on database configuration
-      // Use original database names (preserve case as configured)
-      // Shows all active Switch sensors configured in Settings
-      const switchSens = response.data
-        .filter(s => s.status === 'active' && s.name !== 'Reserved')
-        .sort((a, b) => {
-          // Sort by name for consistent ordering, using natural numeric sorting (e.g. p2 before p10)
-          return (a.name || '').localeCompare(b.name || '', undefined, { numeric: true, sensitivity: 'base' });
-        })
-        .map(s => ({
-          ...s,
-          id: s.id,
-          name: s.name, // Use original database name (preserve case: CH01, ch01, etc.)
-          nameLower: s.name.toLowerCase(), // Keep lowercase for matching
-          location: s.location_name || 'Unknown',
-          type: s.sensor_type || 'Unknown',
-          widget_type: s.widget_type || 'on_off_card',
-          unit: s.unit || '',
-          isActive: false,
-          value: 0 // Initialize with OFF state (value=0)
-        }));
-
-      setSwitchSensors(switchSens);
-      switchSensorsRef.current = switchSens;
-
-      // Fetch latest sensor data to determine current active sensor
-      if (switchSens.length > 0) {
-        fetchLatestSensorData(switchSens);
-      }
-
-      if (response.data.length > 0 && !selectedSensor) {
-        setSelectedSensor(response.data[0]);
-      }
     } catch (error) {
       console.error('Error fetching sensors:', error);
     } finally {
@@ -1006,20 +1018,32 @@ const Dashboard = () => {
         </div>
       )}
 
-      <div className="mb-6">
-        <div className="flex items-center justify-between">
+      <div className="mb-6 flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div className="flex items-center gap-4">
           <h1 className="text-3xl font-bold">Dashboard</h1>
-          <div className="flex items-center gap-2">
-            <div className={`w-3 h-3 rounded-full ${payloadReceived ? 'bg-green-500' : 'bg-gray-400'} ${payloadReceived ? 'animate-pulse' : ''}`}></div>
-            <span className="text-sm text-gray-600 font-medium">
-              {payloadReceived ? 'Live' : 'Offline'}
+          {devices.length > 0 && (
+            <select
+              value={selectedDeviceId}
+              onChange={(e) => setSelectedDeviceId(e.target.value)}
+              className="px-3 py-1.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none bg-white text-gray-700 shadow-sm transition duration-150 ease-in-out font-medium"
+            >
+              <option value="">All Devices</option>
+              {devices.map(id => (
+                <option key={id} value={id}>Device: {id}</option>
+              ))}
+            </select>
+          )}
+        </div>
+        <div className="flex items-center gap-2 bg-white px-4 py-2 rounded-lg shadow border border-gray-200">
+          <div className={`w-3 h-3 rounded-full ${payloadReceived ? 'bg-green-500 animate-pulse shadow-sm' : 'bg-gray-400'}`}></div>
+          <span className="text-sm text-gray-700 font-semibold">
+            {payloadReceived ? 'Live' : 'Offline'}
+          </span>
+          {lastPayloadTime && (
+            <span className="text-xs text-gray-500 ml-2 font-medium border-l border-gray-300 pl-2">
+              Last: {lastPayloadTime.toLocaleTimeString()}
             </span>
-            {lastPayloadTime && (
-              <span className="text-xs text-gray-500 ml-2">
-                Last: {lastPayloadTime.toLocaleTimeString()}
-              </span>
-            )}
-          </div>
+          )}
         </div>
       </div>
 
