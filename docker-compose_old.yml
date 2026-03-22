@@ -1,0 +1,84 @@
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: iot-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: iot_dashboard
+      POSTGRES_USER: iotuser
+      POSTGRES_PASSWORD: iotpassword
+      TZ: Asia/Singapore
+    ports:
+      - "5434:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U iotuser -d iot_dashboard"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command: ["postgres", "-c", "timezone=Asia/Singapore"]
+    networks:
+      - iot-network
+
+  mosquitto:
+    image: eclipse-mosquitto:latest
+    container_name: iot-mosquitto
+    restart: always
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - ./mosquitto/config:/mosquitto/config
+      - mosquitto_data:/mosquitto/data
+    networks:
+      - iot-network
+
+  backend:
+    build: ./backend
+    container_name: iot-backend
+    restart: always
+    ports:
+      - "127.0.0.1:5001:5000"
+    environment:
+      DATABASE_URL: postgresql://iotuser:iotpassword@postgres:5432/iot_dashboard
+      MQTT_BROKER_URL: mqtts://9213530428624354bfc54e44a2a16413.s1.eu.hivemq.cloud:8883
+      MQTT_USERNAME: iot-sense
+      MQTT_PASSWORD: 'Tech2026*'
+      MQTT_TOPIC: voltas
+      JWT_SECRET: your-super-secret-jwt-key-change-in-production
+      JWT_EXPIRES_IN: 7d
+      NODE_ENV: production
+      DB_SSL: 'false'
+      TZ: Asia/Singapore
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mosquitto:
+        condition: service_started
+    networks:
+      - iot-network
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        REACT_APP_API_URL: /api
+        REACT_APP_WS_URL: /
+    container_name: iot-frontend
+    restart: always
+    ports:
+      - "127.0.0.1:8080:80"
+    depends_on:
+      - backend
+    networks:
+      - iot-network
+
+volumes:
+  postgres_data:
+  mosquitto_data:
+
+networks:
+  iot-network:
+    driver: bridge

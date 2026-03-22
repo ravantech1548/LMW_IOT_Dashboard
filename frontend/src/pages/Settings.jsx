@@ -1,0 +1,1020 @@
+import React, { useState, useEffect } from 'react';
+import api from '../utils/api';
+import { useSettings } from '../context/SettingsContext';
+
+const Settings = () => {
+  const { refreshSettings } = useSettings();
+  const [activeTab, setActiveTab] = useState('clients');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+
+  // Data states
+  const [clients, setClients] = useState([]);
+  const [departments, setDepartments] = useState([]);
+  const [locations, setLocations] = useState([]);
+  const [sensorTypes, setSensorTypes] = useState([]);
+  const [users, setUsers] = useState([]);
+  const [shifts, setShifts] = useState([]);
+  const [systemSettings, setSystemSettings] = useState({});
+
+  // Form states
+  const [formData, setFormData] = useState({});
+  const [showForm, setShowForm] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+
+  const tabs = [
+    { id: 'clients', name: 'Clients' },
+    { id: 'departments', name: 'Departments' },
+    { id: 'locations', name: 'Locations' },
+    { id: 'sensor-types', name: 'Sensor Types' },
+    { id: 'shifts', name: 'Shifts' },
+    { id: 'users', name: 'Users' },
+    { id: 'system-settings', name: 'System Settings' }
+  ];
+
+  // Fetch data based on active tab
+  useEffect(() => {
+    fetchData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
+
+  // Auto-open form for system-settings when tab is selected or when settings are loaded
+  useEffect(() => {
+    if (activeTab === 'system-settings' && !showForm) {
+      setEditingId('system-settings');
+      // Get initial form data - use systemSettings if available, otherwise defaults
+      const initialData = {
+        timezone: systemSettings.timezone?.value || 'Asia/Kolkata',
+        payload_timeout_minutes: systemSettings.payload_timeout_minutes?.value || '5',
+        offline_check_interval_minutes: systemSettings.offline_check_interval_minutes?.value || '1',
+        heartbeat_interval_minutes: systemSettings.heartbeat_interval_minutes?.value || '1'
+      };
+      setFormData(initialData);
+      setShowForm(true);
+    }
+
+    // Also update form data when systemSettings change (after initial load)
+    if (activeTab === 'system-settings' && showForm && Object.keys(systemSettings).length > 0) {
+      const updatedData = {
+        timezone: systemSettings.timezone?.value || 'Asia/Kolkata',
+        payload_timeout_minutes: systemSettings.payload_timeout_minutes?.value || '5',
+        offline_check_interval_minutes: systemSettings.offline_check_interval_minutes?.value || '1',
+        heartbeat_interval_minutes: systemSettings.heartbeat_interval_minutes?.value || '1'
+      };
+      setFormData(updatedData);
+    }
+  }, [activeTab, systemSettings, showForm]);
+
+  const fetchData = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      switch (activeTab) {
+        case 'clients':
+          const clientsRes = await api.get('/clients');
+          setClients(clientsRes.data);
+          break;
+        case 'departments':
+          const deptRes = await api.get('/departments');
+          setDepartments(deptRes.data);
+          // Fetch clients for dropdown
+          const clientsForDept = await api.get('/clients');
+          setClients(clientsForDept.data);
+          break;
+        case 'locations':
+          const locRes = await api.get('/locations');
+          setLocations(locRes.data);
+          // Fetch departments for dropdown
+          const deptForLoc = await api.get('/departments');
+          setDepartments(deptForLoc.data);
+          break;
+        case 'sensor-types':
+          const stForList = await api.get('/sensor-types');
+          setSensorTypes(stForList.data);
+          break;
+        case 'shifts':
+          const shiftsRes = await api.get('/shifts');
+          setShifts(shiftsRes.data);
+          break;
+        case 'users':
+          const usersRes = await api.get('/users');
+          setUsers(usersRes.data);
+          // Fetch clients and shifts for dropdowns
+          const clientsForUsers = await api.get('/clients');
+          setClients(clientsForUsers.data);
+          const shiftsForUsers = await api.get('/shifts');
+          setShifts(shiftsForUsers.data);
+          break;
+        case 'system-settings':
+          const settingsRes = await api.get('/settings');
+          setSystemSettings(settingsRes.data);
+          break;
+        default:
+          // No data to fetch for this tab
+          break;
+      }
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to fetch data');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCreate = () => {
+    setEditingId(null);
+    // For system settings, always show edit form (no create needed)
+    if (activeTab === 'system-settings') {
+      setEditingId('system-settings'); // Use a special ID to trigger update mode
+    }
+    setFormData(getInitialFormData());
+    setShowForm(true);
+    setError('');
+    setSuccess('');
+  };
+
+  const handleEdit = (item) => {
+    setEditingId(item.id);
+    const editData = { ...item };
+    setFormData(editData);
+    setShowForm(true);
+    setError('');
+    setSuccess('');
+  };
+
+  const handleDelete = async (id) => {
+    if (!window.confirm('Are you sure you want to delete this item?')) {
+      return;
+    }
+
+    try {
+      setLoading(true);
+      switch (activeTab) {
+        case 'clients':
+          await api.delete(`/clients/${id}`);
+          break;
+        case 'departments':
+          await api.delete(`/departments/${id}`);
+          break;
+        case 'locations':
+          await api.delete(`/locations/${id}`);
+          break;
+        case 'sensor-types':
+          await api.delete(`/sensor-types/${id}`);
+          break;
+        case 'shifts':
+          await api.delete(`/shifts/${id}`);
+          break;
+        case 'users':
+          await api.delete(`/users/${id}`);
+          break;
+        default:
+          // No delete action for this tab
+          break;
+      }
+      setSuccess('Item deleted successfully');
+      fetchData();
+      setTimeout(() => setSuccess(''), 3000);
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to delete item');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    setError('');
+    setSuccess('');
+
+    try {
+      let submitData = { ...formData };
+
+      // For users, handle password field (only send if provided when editing)
+      if (activeTab === 'users') {
+        if (editingId && !submitData.password) {
+          // Remove password from update if not provided
+          delete submitData.password;
+        }
+        // Convert empty strings to null for optional fields
+        if (submitData.client_id === '') submitData.client_id = null;
+        if (submitData.shift_id === '' || submitData.role !== 'operator') submitData.shift_id = null;
+      }
+
+      // System settings always use update (no create)
+      if (activeTab === 'system-settings' || editingId) {
+        // Update
+        switch (activeTab) {
+          case 'clients':
+            await api.put(`/clients/${editingId}`, submitData);
+            break;
+          case 'departments':
+            await api.put(`/departments/${editingId}`, submitData);
+            break;
+          case 'locations':
+            await api.put(`/locations/${editingId}`, submitData);
+            break;
+          case 'sensor-types':
+            await api.put(`/sensor-types/${editingId}`, submitData);
+            break;
+          case 'shifts':
+            await api.put(`/shifts/${editingId}`, submitData);
+            break;
+          case 'users':
+            await api.put(`/users/${editingId}`, submitData);
+            break;
+          case 'system-settings':
+            // System settings are updated via bulk update endpoint
+            await api.put('/settings', { settings: submitData });
+            // Reload settings to get the updated values
+            const updatedSettingsRes = await api.get('/settings');
+            setSystemSettings(updatedSettingsRes.data);
+            // Update formData with the newly saved values
+            const updatedFormData = {
+              timezone: updatedSettingsRes.data.timezone?.value || 'Asia/Kolkata',
+              payload_timeout_minutes: updatedSettingsRes.data.payload_timeout_minutes?.value || '5',
+              offline_check_interval_minutes: updatedSettingsRes.data.offline_check_interval_minutes?.value || '1',
+              heartbeat_interval_minutes: updatedSettingsRes.data.heartbeat_interval_minutes?.value || '1'
+            };
+            setFormData(updatedFormData);
+            await refreshSettings(); // Refresh global settings context
+            break;
+        }
+        setSuccess(activeTab === 'system-settings' ? 'Settings updated successfully' : 'Item updated successfully');
+      } else {
+        // Create
+        switch (activeTab) {
+          case 'clients':
+            await api.post('/clients', submitData);
+            break;
+          case 'departments':
+            await api.post('/departments', submitData);
+            break;
+          case 'locations':
+            await api.post('/locations', submitData);
+            break;
+          case 'sensor-types':
+            await api.post('/sensor-types', submitData);
+            break;
+          case 'shifts':
+            await api.post('/shifts', submitData);
+            break;
+          case 'users':
+            await api.post('/users', submitData);
+            break;
+          default:
+            // No create action for this tab
+            break;
+        }
+        setSuccess('Item created successfully');
+      }
+      // For system settings, keep form open and show updated values
+      if (activeTab === 'system-settings') {
+        setSuccess('Settings updated successfully');
+        // Keep form open for system settings - don't close it
+        // Form data is already updated above with new values
+      } else {
+        setShowForm(false);
+      }
+      fetchData();
+      setTimeout(() => setSuccess(''), 3000);
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to save item');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const getInitialFormData = () => {
+    switch (activeTab) {
+      case 'clients':
+        return { id: '', name: '', site_address: '', contact_email: '' };
+      case 'departments':
+        return { client_id: '', name: '', description: '' };
+      case 'locations':
+        return { department_id: '', name: '', floor_level: '' };
+      case 'sensor-types':
+        return { name: '', unit: '', description: '', min_value: '', max_value: '', widget_type: 'line_chart' };
+      case 'shifts':
+        return { name: '', start_time: '', end_time: '', description: '', is_active: true };
+      case 'users':
+        return { username: '', email: '', password: '', role: 'viewer', client_id: '', shift_id: '' };
+      case 'system-settings':
+        return {
+          timezone: systemSettings.timezone?.value || 'Asia/Kolkata',
+          payload_timeout_minutes: systemSettings.payload_timeout_minutes?.value || '5',
+          offline_check_interval_minutes: systemSettings.offline_check_interval_minutes?.value || '1',
+          heartbeat_interval_minutes: systemSettings.heartbeat_interval_minutes?.value || '1'
+        };
+      default:
+        return {};
+    }
+  };
+
+  const renderForm = () => {
+    // For system-settings, always show the form when tab is selected (auto-opens via useEffect)
+    if (activeTab === 'system-settings' && !showForm) {
+      return null; // Will be opened by useEffect
+    }
+
+    if (!showForm) {
+      return null;
+    }
+
+    return (
+      <div className="bg-white rounded-lg shadow p-6 mb-6">
+        <h3 className="text-lg font-semibold mb-4">
+          {activeTab === 'system-settings' ? 'System Settings' : (editingId ? 'Edit' : 'Create') + ' ' + tabs.find(t => t.id === activeTab)?.name.slice(0, -1)}
+        </h3>
+        <form onSubmit={handleSubmit} className="space-y-4">
+          {activeTab === 'clients' && (
+            <>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Client ID *</label>
+                <input
+                  type="text"
+                  required
+                  disabled={!!editingId}
+                  value={formData.id || ''}
+                  onChange={(e) => setFormData({ ...formData, id: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 disabled:bg-gray-100 disabled:text-gray-500"
+                  placeholder="e.g., VOLTAS-01"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Name *</label>
+                <input
+                  type="text"
+                  required
+                  value={formData.name || ''}
+                  onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Site Address</label>
+                <input
+                  type="text"
+                  value={formData.site_address || ''}
+                  onChange={(e) => setFormData({ ...formData, site_address: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Contact Email</label>
+                <input
+                  type="email"
+                  value={formData.contact_email || ''}
+                  onChange={(e) => setFormData({ ...formData, contact_email: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
+                />
+              </div>
+            </>
+          )}
+
+          {activeTab === 'departments' && (
+            <>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Client *</label>
+                <select
+                  required
+                  value={formData.client_id || ''}
+                  onChange={(e) => setFormData({ ...formData, client_id: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
+                >
+                  <option value="">Select a client</option>
+                  {clients.map(client => (
+                    <option key={client.id} value={client.id}>{client.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Name *</label>
+                <input
+                  type="text"
+                  required
+                  value={formData.name || ''}
+                  onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+                <textarea
+                  value={formData.description || ''}
+                  onChange={(e) => setFormData({ ...formData, description: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
+                  rows="3"
+                />
+              </div>
+            </>
+          )}
+
+          {activeTab === 'locations' && (
+            <>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Department *</label>
+                <select
+                  required
+                  value={formData.department_id || ''}
+                  onChange={(e) => setFormData({ ...formData, department_id: parseInt(e.target.value) })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
+                >
+                  <option value="">Select a department</option>
+                  {departments.map(dept => (
+                    <option key={dept.id} value={dept.id}>{dept.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Name *</label>
+                <input
+                  type="text"
+                  required
+                  value={formData.name || ''}
+                  onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Floor Level</label>
+                <input
+                  type="text"
+                  value={formData.floor_level || ''}
+                  onChange={(e) => setFormData({ ...formData, floor_level: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
+                />
+              </div>
+            </>
+          )}
+
+          {activeTab === 'sensor-types' && (
+            <>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Name *</label>
+                <input
+                  type="text"
+                  required
+                  value={formData.name || ''}
+                  onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Unit</label>
+                <input
+                  type="text"
+                  value={formData.unit || ''}
+                  onChange={(e) => setFormData({ ...formData, unit: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+                <textarea
+                  value={formData.description || ''}
+                  onChange={(e) => setFormData({ ...formData, description: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
+                  rows="3"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Min Value</label>
+                  <input
+                    type="number"
+                    step="any"
+                    value={formData.min_value ?? ''}
+                    onChange={(e) => setFormData({ ...formData, min_value: e.target.value === '' ? null : parseFloat(e.target.value) })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Max Value</label>
+                  <input
+                    type="number"
+                    step="any"
+                    value={formData.max_value ?? ''}
+                    onChange={(e) => setFormData({ ...formData, max_value: e.target.value === '' ? null : parseFloat(e.target.value) })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Dashboard Widget Type
+                  <span className="text-xs text-gray-500 ml-2">How this sensor type is displayed on the dashboard</span>
+                </label>
+                <select
+                  value={formData.widget_type || 'line_chart'}
+                  onChange={(e) => setFormData({ ...formData, widget_type: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
+                >
+                  <option value="line_chart">📈 Line Chart (time-series trends)</option>
+                  <option value="gauge">🌡️ Gauge (current value with min/max)</option>
+                  <option value="on_off_card">🔴 On/Off Card (binary status)</option>
+                  <option value="numeric_card">🔢 Numeric Card (simple value display)</option>
+                  <option value="bar_chart">📊 Bar Chart (comparison view)</option>
+                </select>
+                <p className="mt-1 text-xs text-gray-500">
+                  This determines which widget component renders for each sensor of this type on the dashboard.
+                </p>
+              </div>
+            </>
+          )}
+
+          {activeTab === 'shifts' && (
+            <>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Name *</label>
+                <input
+                  type="text"
+                  required
+                  value={formData.name || ''}
+                  onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
+                  placeholder="e.g., Morning Shift"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Start Time *</label>
+                  <input
+                    type="time"
+                    required
+                    value={formData.start_time || ''}
+                    onChange={(e) => setFormData({ ...formData, start_time: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">Format: HH:mm (24-hour)</p>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">End Time *</label>
+                  <input
+                    type="time"
+                    required
+                    value={formData.end_time || ''}
+                    onChange={(e) => setFormData({ ...formData, end_time: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">Format: HH:mm (24-hour)</p>
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+                <textarea
+                  value={formData.description || ''}
+                  onChange={(e) => setFormData({ ...formData, description: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
+                  rows="3"
+                  placeholder="e.g., Morning shift from 6 AM to 2 PM"
+                />
+              </div>
+              <div>
+                <label className="flex items-center space-x-2">
+                  <input
+                    type="checkbox"
+                    checked={formData.is_active !== false}
+                    onChange={(e) => setFormData({ ...formData, is_active: e.target.checked })}
+                    className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                  />
+                  <span className="text-sm font-medium text-gray-700">Active</span>
+                </label>
+                <p className="text-xs text-gray-500 mt-1">Only active shifts can be assigned to operators</p>
+              </div>
+            </>
+          )}
+
+          {activeTab === 'system-settings' && (
+            <>
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4">
+                <p className="text-sm text-blue-800">
+                  <strong>Note:</strong> These settings control how the system detects online/offline status for MQTT devices.
+                  Changes take effect immediately after saving.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  System Timezone *
+                  <span className="text-xs text-gray-500 ml-2">Controls time display across dashboard</span>
+                </label>
+                <select
+                  required
+                  value={formData.timezone || 'Asia/Kolkata'}
+                  onChange={(e) => setFormData({ ...formData, timezone: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
+                >
+                  <option value="Asia/Kolkata">India (IST) - Asia/Kolkata</option>
+                  <option value="Asia/Singapore">Singapore (SGT) - Asia/Singapore</option>
+                </select>
+                <p className="mt-1 text-xs text-gray-500">
+                  Select the timezone for displaying dates and times.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Payload Timeout (minutes) *
+                  <span className="text-xs text-gray-500 ml-2">Default: 5 minutes</span>
+                </label>
+                <input
+                  type="number"
+                  required
+                  min="0.5"
+                  max="60"
+                  step="0.5"
+                  value={formData.payload_timeout_minutes !== undefined ? formData.payload_timeout_minutes : (systemSettings.payload_timeout_minutes?.value || '5')}
+                  onChange={(e) => setFormData({ ...formData, payload_timeout_minutes: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
+                />
+                <p className="mt-1 text-xs text-gray-500">
+                  Time in minutes without payload before device is marked as offline.
+                  Should be greater than your payload sending interval. (e.g., if payloads send every 2 minutes, set to 3-5 minutes)
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Offline Check Interval (minutes) *
+                  <span className="text-xs text-gray-500 ml-2">Default: 1 minute</span>
+                </label>
+                <input
+                  type="number"
+                  required
+                  min="0.5"
+                  max="60"
+                  step="0.5"
+                  value={formData.offline_check_interval_minutes !== undefined ? formData.offline_check_interval_minutes : (systemSettings.offline_check_interval_minutes?.value || '1')}
+                  onChange={(e) => setFormData({ ...formData, offline_check_interval_minutes: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
+                />
+                <p className="mt-1 text-xs text-gray-500">
+                  How often the system checks for offline devices (in minutes). Lower values provide faster offline detection but use more resources.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Heartbeat Interval (minutes) *
+                  <span className="text-xs text-gray-500 ml-2">Default: 15 minutes</span>
+                </label>
+                <input
+                  type="number"
+                  required
+                  min="0.5"
+                  max="60"
+                  step="0.5"
+                  value={formData.heartbeat_interval_minutes !== undefined ? formData.heartbeat_interval_minutes : (systemSettings.heartbeat_interval_minutes?.value || '1')}
+                  onChange={(e) => setFormData({ ...formData, heartbeat_interval_minutes: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
+                />
+                <p className="mt-1 text-xs text-gray-500">
+                  How often to insert heartbeat records when sensor values haven't changed (in minutes).
+                  This ensures the system remains marked as "Live" even when sensor status is unchanged.
+                </p>
+              </div>
+            </>
+          )}
+
+          {activeTab === 'users' && (
+            <>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Username *</label>
+                <input
+                  type="text"
+                  required
+                  value={formData.username || ''}
+                  onChange={(e) => setFormData({ ...formData, username: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Email *</label>
+                <input
+                  type="email"
+                  required
+                  value={formData.email || ''}
+                  onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Password {editingId ? '(leave blank to keep current)' : '*'}
+                </label>
+                <input
+                  type="password"
+                  required={!editingId}
+                  value={formData.password || ''}
+                  onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
+                  placeholder={editingId ? 'Leave blank to keep current password' : 'Enter password'}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Role *</label>
+                <select
+                  required
+                  value={formData.role || 'viewer'}
+                  onChange={(e) => {
+                    const newRole = e.target.value;
+                    setFormData({
+                      ...formData,
+                      role: newRole,
+                      // Clear shift_id if role is not operator
+                      shift_id: newRole === 'operator' ? formData.shift_id : ''
+                    });
+                  }}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
+                >
+                  <option value="viewer">Viewer</option>
+                  <option value="operator">Operator</option>
+                  <option value="manager">Manager</option>
+                  <option value="admin">Admin</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Client (Optional)</label>
+                <select
+                  value={formData.client_id || ''}
+                  onChange={(e) => setFormData({ ...formData, client_id: e.target.value ? e.target.value : null })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
+                >
+                  <option value="">No client assigned</option>
+                  {clients.map(client => (
+                    <option key={client.id} value={client.id}>{client.name}</option>
+                  ))}
+                </select>
+                <p className="text-xs text-gray-500 mt-1">Leave blank for admins or users with full access</p>
+              </div>
+              {formData.role === 'operator' && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Shift *</label>
+                  <select
+                    required
+                    value={formData.shift_id || ''}
+                    onChange={(e) => setFormData({ ...formData, shift_id: e.target.value ? parseInt(e.target.value) : null })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
+                  >
+                    <option value="">Select a shift</option>
+                    {shifts.filter(s => s.is_active).map(shift => (
+                      <option key={shift.id} value={shift.id}>
+                        {shift.name} ({shift.start_time.slice(0, 5)} - {shift.end_time.slice(0, 5)})
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-gray-500 mt-1">Shift is required for operator role</p>
+                </div>
+              )}
+            </>
+          )}
+
+          <div className="flex justify-end space-x-3 pt-4">
+            <button
+              type="button"
+              onClick={() => setShowForm(false)}
+              className="px-4 py-2 border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={loading}
+              className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50"
+            >
+              {loading ? 'Saving...' : editingId ? 'Update' : 'Create'}
+            </button>
+          </div>
+        </form>
+      </div>
+    );
+  };
+
+  const renderTable = () => {
+    // System settings doesn't show a table - it shows a form directly
+    if (activeTab === 'system-settings') {
+      return null; // Don't render table for system settings
+    }
+
+    let data = activeTab === 'clients' ? clients :
+      activeTab === 'departments' ? departments :
+        activeTab === 'locations' ? locations :
+          activeTab === 'sensor-types' ? sensorTypes :
+            activeTab === 'shifts' ? shifts :
+              users;
+
+    // Sort by ID ascending as a safeguard (natural sort)
+    data = [...data].sort((a, b) => String(a.id).localeCompare(String(b.id), undefined, { numeric: true, sensitivity: 'base' }));
+
+    if (loading && data.length === 0) {
+      return <div className="text-center py-8">Loading...</div>;
+    }
+
+    if (data.length === 0) {
+      return <div className="text-center py-8 text-gray-500">No items found. Click "Create" to add one.</div>;
+    }
+
+    const getColumns = () => {
+      switch (activeTab) {
+        case 'clients':
+          return ['ID', 'Name', 'Site Address', 'Contact Email', 'Actions'];
+        case 'departments':
+          return ['ID', 'Client', 'Name', 'Description', 'Actions'];
+        case 'locations':
+          return ['ID', 'Department', 'Name', 'Floor Level', 'Actions'];
+        case 'sensor-types':
+          return ['ID', 'Name', 'Unit', 'Min Value', 'Max Value', 'Actions'];
+        case 'shifts':
+          return ['ID', 'Name', 'Start Time', 'End Time', 'Status', 'Actions'];
+        case 'users':
+          return ['ID', 'Username', 'Email', 'Role', 'Client', 'Shift', 'Actions'];
+        default:
+          return [];
+      }
+    };
+
+    const renderRow = (item) => {
+      switch (activeTab) {
+        case 'clients':
+          return (
+            <tr key={item.id} className="hover:bg-gray-50">
+              <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{item.id}</td>
+              <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{item.name}</td>
+              <td className="px-6 py-4 text-sm text-gray-500">{item.site_address || '-'}</td>
+              <td className="px-6 py-4 text-sm text-gray-500">{item.contact_email || '-'}</td>
+              <td className="px-6 py-4 whitespace-nowrap text-sm font-medium space-x-2">
+                <button onClick={() => handleEdit(item)} className="text-blue-600 hover:text-blue-900">Edit</button>
+                <button onClick={() => handleDelete(item.id)} className="text-red-600 hover:text-red-900">Delete</button>
+              </td>
+            </tr>
+          );
+        case 'departments':
+          return (
+            <tr key={item.id} className="hover:bg-gray-50">
+              <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{item.id}</td>
+              <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{item.client_name || '-'}</td>
+              <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{item.name}</td>
+              <td className="px-6 py-4 text-sm text-gray-500">{item.description || '-'}</td>
+              <td className="px-6 py-4 whitespace-nowrap text-sm font-medium space-x-2">
+                <button onClick={() => handleEdit(item)} className="text-blue-600 hover:text-blue-900">Edit</button>
+                <button onClick={() => handleDelete(item.id)} className="text-red-600 hover:text-red-900">Delete</button>
+              </td>
+            </tr>
+          );
+        case 'locations':
+          return (
+            <tr key={item.id} className="hover:bg-gray-50">
+              <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{item.id}</td>
+              <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{item.department_name || '-'}</td>
+              <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{item.name}</td>
+              <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{item.floor_level || '-'}</td>
+              <td className="px-6 py-4 whitespace-nowrap text-sm font-medium space-x-2">
+                <button onClick={() => handleEdit(item)} className="text-blue-600 hover:text-blue-900">Edit</button>
+                <button onClick={() => handleDelete(item.id)} className="text-red-600 hover:text-red-900">Delete</button>
+              </td>
+            </tr>
+          );
+        case 'sensor-types':
+          return (
+            <tr key={item.id} className="hover:bg-gray-50">
+              <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{item.id}</td>
+              <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{item.name}</td>
+              <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{item.unit || '-'}</td>
+              <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{item.min_value ?? '-'}</td>
+              <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{item.max_value ?? '-'}</td>
+              <td className="px-6 py-4 whitespace-nowrap text-sm font-medium space-x-2">
+                <button onClick={() => handleEdit(item)} className="text-blue-600 hover:text-blue-900">Edit</button>
+                <button onClick={() => handleDelete(item.id)} className="text-red-600 hover:text-red-900">Delete</button>
+              </td>
+            </tr>
+          );
+        case 'shifts':
+          return (
+            <tr key={item.id} className="hover:bg-gray-50">
+              <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{item.id}</td>
+              <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{item.name}</td>
+              <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{item.start_time?.slice(0, 5) || '-'}</td>
+              <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{item.end_time?.slice(0, 5) || '-'}</td>
+              <td className="px-6 py-4 whitespace-nowrap">
+                <span className={`px-2 py-1 text-xs font-semibold rounded-full ${item.is_active ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'
+                  }`}>
+                  {item.is_active ? 'Active' : 'Inactive'}
+                </span>
+              </td>
+              <td className="px-6 py-4 whitespace-nowrap text-sm font-medium space-x-2">
+                <button onClick={() => handleEdit(item)} className="text-blue-600 hover:text-blue-900">Edit</button>
+                <button onClick={() => handleDelete(item.id)} className="text-red-600 hover:text-red-900">Delete</button>
+              </td>
+            </tr>
+          );
+        case 'users':
+          return (
+            <tr key={item.id} className="hover:bg-gray-50">
+              <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{item.id}</td>
+              <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{item.username}</td>
+              <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{item.email}</td>
+              <td className="px-6 py-4 whitespace-nowrap">
+                <span className={`px-2 py-1 text-xs font-semibold rounded-full ${item.role === 'admin' ? 'bg-purple-100 text-purple-800' :
+                  item.role === 'manager' ? 'bg-blue-100 text-blue-800' :
+                    item.role === 'operator' ? 'bg-green-100 text-green-800' :
+                      'bg-gray-100 text-gray-800'
+                  }`}>
+                  {item.role}
+                </span>
+              </td>
+              <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{item.client_name || '-'}</td>
+              <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                {item.shift_name ? `${item.shift_name} (${item.start_time?.slice(0, 5)} - ${item.end_time?.slice(0, 5)})` : '-'}
+              </td>
+              <td className="px-6 py-4 whitespace-nowrap text-sm font-medium space-x-2">
+                <button onClick={() => handleEdit(item)} className="text-blue-600 hover:text-blue-900">Edit</button>
+                <button onClick={() => handleDelete(item.id)} className="text-red-600 hover:text-red-900">Delete</button>
+              </td>
+            </tr>
+          );
+        default:
+          return null;
+      }
+    };
+
+    return (
+      <div className="bg-white rounded-lg shadow overflow-hidden">
+        <table className="min-w-full divide-y divide-gray-200">
+          <thead className="bg-gray-50">
+            <tr>
+              {getColumns().map((col) => (
+                <th key={col} className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  {col}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody className="bg-white divide-y divide-gray-200">
+            {data.map(renderRow)}
+          </tbody>
+        </table>
+      </div>
+    );
+  };
+
+  return (
+    <div className="container mx-auto px-4 py-8">
+      <div className="flex justify-between items-center mb-6">
+        <h1 className="text-3xl font-bold">Settings</h1>
+        {!showForm && (
+          <button
+            onClick={handleCreate}
+            className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 flex items-center space-x-2"
+          >
+            <span>+</span>
+            <span>Create New Entry</span>
+          </button>
+        )}
+      </div>
+
+      {error && (
+        <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
+          {error}
+        </div>
+      )}
+
+      {success && (
+        <div className="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded mb-4">
+          {success}
+        </div>
+      )}
+
+      <div className="border-b border-gray-200 mb-6">
+        <nav className="-mb-px flex space-x-8">
+          {tabs.map(tab => (
+            <button
+              key={tab.id}
+              onClick={() => {
+                setActiveTab(tab.id);
+                setShowForm(false);
+                setError('');
+                setSuccess('');
+              }}
+              className={`
+                whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm
+                ${activeTab === tab.id
+                  ? 'border-blue-500 text-blue-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                }
+              `}
+            >
+              {tab.name}
+            </button>
+          ))}
+        </nav>
+      </div>
+
+      {renderForm()}
+      {renderTable()}
+    </div>
+  );
+};
+
+export default Settings;

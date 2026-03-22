@@ -1,0 +1,1792 @@
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { ComposedChart, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, PieChart, Pie, ReferenceArea } from 'recharts';
+import api from '../utils/api';
+import { useAuth } from '../context/AuthContext';
+import io from 'socket.io-client';
+import { useSettings } from '../context/SettingsContext';
+
+const SwitchSensors = () => {
+  const { user } = useAuth();
+  const { settings } = useSettings();
+  // Default to Asia/Kolkata if not yet loaded
+  const timezone = settings?.timezone || 'Asia/Kolkata';
+  const [sensors, setSensors] = useState([]);
+  const [activeSensorId, setActiveSensorId] = useState(null);
+  const [timelineData, setTimelineData] = useState([]);
+  const [filteredTimelineData, setFilteredTimelineData] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
+  const [shifts, setShifts] = useState([]);
+  const [selectedShiftId, setSelectedShiftId] = useState(null);
+  const [selectedShift, setSelectedShift] = useState(null);
+  const [wsConnected, setWsConnected] = useState(false);
+  const [payloadReceived, setPayloadReceived] = useState(false); // Track if actual payload has been received
+  const [lastUpdateTime, setLastUpdateTime] = useState(null);
+  const [lastPayloadTime, setLastPayloadTime] = useState(null);
+  const [updateCount, setUpdateCount] = useState(0);
+  const [payloadTimeoutMinutes, setPayloadTimeoutMinutes] = useState(5); // Configurable timeout from settings (default 5 minutes)
+  const fetchingTimelineRef = useRef(false);
+  const lastTimelineFetchRef = useRef({ date: null, sensorCount: 0 });
+
+  // Periodically check if data is stale (client-side timeout)
+  useEffect(() => {
+    if (!lastPayloadTime) return;
+
+    const interval = setInterval(() => {
+      const timeoutMs = payloadTimeoutMinutes * 60 * 1000;
+      const timeSinceLast = Date.now() - new Date(lastPayloadTime).getTime();
+
+      if (timeSinceLast > timeoutMs && payloadReceived) {
+        console.log(`⚠️ Client-side timeout: No data received for ${(timeSinceLast / 60000).toFixed(1)} min. Marking Offline.`);
+        setPayloadReceived(false);
+      }
+    }, 30000); // Check every 30 seconds
+
+    return () => clearInterval(interval);
+  }, [lastPayloadTime, payloadReceived, payloadTimeoutMinutes]);
+
+  // Initialize with 6 switch sensors (ch01-ch06)
+  useEffect(() => {
+    initializeSensors();
+    fetchShifts();
+    fetchSystemSettings();
+  }, []);
+
+  // Fetch system settings (timeout configuration)
+  const fetchSystemSettings = async () => {
+    try {
+      const response = await api.get('/settings');
+      const settings = response.data;
+      if (settings.payload_timeout_minutes?.value) {
+        const timeoutValue = parseFloat(settings.payload_timeout_minutes.value);
+        if (!isNaN(timeoutValue) && timeoutValue > 0) {
+          setPayloadTimeoutMinutes(timeoutValue);
+          console.log(`✓ SwitchSensors: Loaded payload timeout: ${timeoutValue} minutes`);
+        }
+      }
+    } catch (error) {
+      console.warn('⚠️ Could not load system settings, using default timeout:', error.message);
+    }
+  };
+
+  // Set initial shift based on user role
+  useEffect(() => {
+    if (shifts.length > 0 && user) {
+      if (user.role === 'operator' && user.shift_id) {
+        // Operator: use their assigned shift
+        const userShift = shifts.find(s => s.id === user.shift_id);
+        if (userShift) {
+          setSelectedShiftId(user.shift_id);
+          setSelectedShift(userShift);
+        }
+      } else if (user.role === 'admin' && shifts.length > 0) {
+        // Admin: default to first shift, but can change
+        setSelectedShiftId(shifts[0].id);
+        setSelectedShift(shifts[0]);
+      }
+    }
+  }, [shifts, user]);
+
+  const fetchShifts = async () => {
+    try {
+      const response = await api.get('/shifts');
+      setShifts(response.data.filter(s => s.is_active));
+    } catch (error) {
+      console.error('Error fetching shifts:', error);
+    }
+  };
+
+  // Helper function to filter data by shift hours
+  const filterDataByShift = (data, shift) => {
+    if (!shift || !shift.start_time || !shift.end_time) {
+      console.log(`⚠️  filterDataByShift: No shift provided or missing times - returning all data`);
+      return data;
+    }
+
+    const startTime = shift.start_time.slice(0, 5); // HH:mm
+    const endTime = shift.end_time.slice(0, 5); // HH:mm
+
+    const [startHour, startMin] = startTime.split(':').map(Number);
+    const [endHour, endMin] = endTime.split(':').map(Number);
+
+    const startMinutes = startHour * 60 + startMin;
+    const endMinutes = endHour * 60 + endMin;
+
+    // Handle overnight shifts (e.g., 22:00 - 06:00)
+    const isOvernight = endMinutes <= startMinutes;
+
+    console.log(`🔄 Filtering data by shift ${shift.name}: ${startTime} - ${endTime} (overnight: ${isOvernight})`);
+
+    const filtered = data.filter(point => {
+      // Use timestamp if available (more accurate), otherwise parse from point.time
+      let pointMinutes;
+
+      if (point.fullTimestamp) {
+        // Use actual timestamp (preferred method)
+        const time = new Date(point.fullTimestamp);
+        pointMinutes = time.getHours() * 60 + time.getMinutes();
+      } else if (point.timestamp) {
+        // Use timestamp string
+        const time = new Date(point.timestamp);
+        pointMinutes = time.getHours() * 60 + time.getMinutes();
+      } else if (point.time) {
+        // Parse time from point.time (format: "HH:mm")
+        const timeParts = point.time.split(':');
+        if (timeParts.length < 2) return false; // Exclude if time parsing fails
+
+        const hour = parseInt(timeParts[0], 10);
+        const min = parseInt(timeParts[1] || '0', 10);
+
+        if (isNaN(hour) || isNaN(min)) return false; // Exclude if time parsing fails
+
+        pointMinutes = hour * 60 + min;
+      } else {
+        return false; // No time information available
+      }
+
+      if (isOvernight) {
+        // Overnight shift: point is valid if >= start OR <= end
+        // This includes times from start (e.g., 23:00) to end (e.g., 07:00) next day
+        return pointMinutes >= startMinutes || pointMinutes <= endMinutes;
+      } else {
+        // Normal shift: point is valid if between start and end
+        return pointMinutes >= startMinutes && pointMinutes <= endMinutes;
+      }
+    });
+
+    console.log(`✅ Shift filter: ${filtered.length} of ${data.length} points match shift hours`);
+
+    // For overnight shifts, sort so that start time comes first (22:00 before 00:00)
+    if (isOvernight && filtered.length > 0) {
+      return filtered.sort((a, b) => {
+        // Use timestamp if available, otherwise parse from time string
+        let minutesA, minutesB;
+
+        if (a.fullTimestamp) {
+          const timeA = new Date(a.fullTimestamp);
+          minutesA = timeA.getHours() * 60 + timeA.getMinutes();
+        } else if (a.timestamp) {
+          const timeA = new Date(a.timestamp);
+          minutesA = timeA.getHours() * 60 + timeA.getMinutes();
+        } else {
+          const [hourA, minA] = a.time.split(':').map(Number);
+          minutesA = hourA * 60 + minA;
+        }
+
+        if (b.fullTimestamp) {
+          const timeB = new Date(b.fullTimestamp);
+          minutesB = timeB.getHours() * 60 + timeB.getMinutes();
+        } else if (b.timestamp) {
+          const timeB = new Date(b.timestamp);
+          minutesB = timeB.getHours() * 60 + timeB.getMinutes();
+        } else {
+          const [hourB, minB] = b.time.split(':').map(Number);
+          minutesB = hourB * 60 + minB;
+        }
+
+        // If both are in the "evening" part (>= start), sort normally
+        if (minutesA >= startMinutes && minutesB >= startMinutes) {
+          return minutesA - minutesB;
+        }
+        // If both are in the "morning" part (<= end), sort normally
+        if (minutesA <= endMinutes && minutesB <= endMinutes) {
+          return minutesA - minutesB;
+        }
+        // If A is in evening (>= start) and B is in morning (<= end), A comes first
+        if (minutesA >= startMinutes && minutesB <= endMinutes) {
+          return -1;
+        }
+        // If A is in morning (<= end) and B is in evening (>= start), B comes first
+        if (minutesA <= endMinutes && minutesB >= startMinutes) {
+          return 1;
+        }
+        return minutesA - minutesB;
+      });
+    }
+
+    return filtered;
+  };
+
+  // Create stable key for sensors to avoid unnecessary re-fetches on state updates
+  const sensorIdsString = useMemo(() => sensors.map(s => s.id).sort().join(','), [sensors]);
+
+  // Fetch timeline data when sensors are loaded or date changes
+  useEffect(() => {
+    console.log('📅 Selected date changed or sensors list updated:', selectedDate);
+    if (sensors.length > 0) {
+      fetchTimelineDataForDate();
+    } else {
+      setTimelineData([]);
+    }
+  }, [selectedDate, sensorIdsString]); // Use stable ID string to prevent loop on value updates
+
+  // Fetch historical data for the selected date
+  const fetchTimelineDataForDate = async () => {
+    if (sensors.length === 0) return;
+
+    fetchingTimelineRef.current = true;
+    try {
+      console.log(`📅 Fetching timeline data for date: ${selectedDate}`);
+
+      // Use local date components to avoid timezone issues
+      const dateParts = selectedDate.split('-');
+      const year = parseInt(dateParts[0], 10);
+      const month = parseInt(dateParts[1], 10) - 1; // Month is 0-indexed
+      const day = parseInt(dateParts[2], 10);
+
+      // Create dates in local timezone
+      const startDate = new Date(year, month, day, 0, 0, 0, 0);
+      const endDate = new Date(year, month, day, 23, 59, 59, 999);
+
+      // Calculate timezone offset to ensure we fetch the correct UTC range
+      // getTimezoneOffset() returns minutes difference: UTC - Local (negative if local is ahead)
+      // Example: UTC+5:30 (IST) returns -330, meaning UTC is 330 minutes behind local
+      // To convert local to UTC: UTC = Local - offset = Local - (-330) = Local + 330
+      // So we SUBTRACT the negative offset (i.e., ADD it)
+      const tzOffsetMinutes = startDate.getTimezoneOffset(); // e.g., -330 for UTC+5:30
+      const tzOffsetMs = tzOffsetMinutes * 60000;
+      const startDateUTC = new Date(startDate.getTime() - tzOffsetMs); // Subtract negative = add
+      const endDateUTC = new Date(endDate.getTime() - tzOffsetMs);
+
+      console.log(`📅 Fetching timeline data for date: ${selectedDate}`);
+      console.log(`   Local timezone: ${Intl.DateTimeFormat().resolvedOptions().timeZone}`);
+      console.log(`   Timezone offset: ${tzOffsetMinutes} minutes (UTC ${tzOffsetMinutes < 0 ? '+' : ''}${(tzOffsetMinutes / -60).toFixed(1)})`);
+      console.log(`   Local date range: ${startDate.toLocaleString()} to ${endDate.toLocaleString()}`);
+      console.log(`   UTC date range (for DB query): ${startDateUTC.toISOString()} to ${endDateUTC.toISOString()}`);
+      console.log(`   This ensures all records for the selected LOCAL date are fetched`);
+
+      // Fetch data for all sensors using UTC-adjusted dates
+      // This ensures we get all records for the selected local date regardless of timezone
+      const allDataPromises = sensors.map(sensor =>
+        api.get(`/data/sensor/${sensor.id}`, {
+          params: {
+            start_time: startDateUTC.toISOString(),
+            end_time: endDateUTC.toISOString(),
+            limit: 10000
+          }
+        }).catch(err => {
+          console.error(`Error fetching data for ${sensor.name}:`, err);
+          return { data: [] };
+        })
+      );
+
+      const allResponses = await Promise.all(allDataPromises);
+
+      // Combine all sensor data into timeline format
+      const dataMap = new Map();
+
+      let totalRecords = 0;
+      sensors.forEach((sensor, sensorIndex) => {
+        const sensorData = allResponses[sensorIndex].data || [];
+        console.log(`📊 Fetched ${sensorData.length} records for ${sensor.name}`);
+        totalRecords += sensorData.length;
+
+        sensorData.forEach(item => {
+          // Parse timestamp - database stores in UTC, convert to local timezone for display
+          const time = new Date(item.timestamp);
+
+          // Verify the timestamp falls within the selected date in LOCAL timezone
+          // This ensures we only process records for the correct local date
+          const localYear = time.getFullYear();
+          const localMonth = time.getMonth() + 1;
+          const localDay = time.getDate();
+          const selectedYear = parseInt(dateParts[0], 10);
+          const selectedMonth = parseInt(dateParts[1], 10);
+          const selectedDay = parseInt(dateParts[2], 10);
+
+          // Only process if the record's local date matches the selected date
+          if (localYear !== selectedYear || localMonth !== selectedMonth || localDay !== selectedDay) {
+            // This record is from a different date in local timezone - skip it
+            return;
+          }
+
+          // Use actual timestamp with seconds precision to preserve all database records
+          // Round to nearest 10 seconds to group very close timestamps (within same second)
+          const roundedSeconds = Math.floor(time.getSeconds() / 10) * 10;
+          const timeKey = `${String(time.getHours()).padStart(2, '0')}:${String(time.getMinutes()).padStart(2, '0')}:${String(roundedSeconds).padStart(2, '0')}`;
+
+          if (!dataMap.has(timeKey)) {
+            dataMap.set(timeKey, {
+              time: `${String(time.getHours()).padStart(2, '0')}:${String(time.getMinutes()).padStart(2, '0')}`,
+              timestamp: time.toISOString(),
+              fullTimestamp: time // Store as Date object for accurate time calculations in local timezone
+            });
+            // Initialize all sensors to 0 - use nameLower for data keys
+            sensors.forEach(s => {
+              const keyName = s.nameLower || s.name.toLowerCase();
+              dataMap.get(timeKey)[keyName] = 0;
+            });
+          }
+
+          const point = dataMap.get(timeKey);
+          // Use nameLower for data keys to ensure consistency
+          const keyName = sensor.nameLower || sensor.name.toLowerCase();
+          // Keep the latest value if multiple records exist at same time
+          const newValue = parseFloat(item.value);
+          const pointTime = point.fullTimestamp ? new Date(point.fullTimestamp) : new Date(point.timestamp);
+          if (point[keyName] === 0 || time > pointTime) {
+            point[keyName] = newValue;
+            point.timestamp = time.toISOString(); // Update to latest timestamp
+            point.fullTimestamp = time; // Store as Date object in local timezone context
+          }
+        });
+      });
+
+      console.log(`📊 Total database records processed: ${totalRecords}`);
+      console.log(`📊 Total timeline points created: ${dataMap.size}`);
+
+      // Convert map to array and sort by timestamp (preserves all records)
+      const timelineArray = Array.from(dataMap.values()).sort((a, b) => {
+        const timeA = a.fullTimestamp ? new Date(a.fullTimestamp) : new Date(a.timestamp);
+        const timeB = b.fullTimestamp ? new Date(b.fullTimestamp) : new Date(b.timestamp);
+        return timeA - timeB;
+      });
+
+      console.log(`✅ Timeline array created with ${timelineArray.length} points`);
+
+      if (timelineArray.length === 0) {
+        console.warn(`⚠️  No timeline data found for date ${selectedDate}. Check:`);
+        console.warn(`   1. Database has records for this date (check UTC date range: ${startDateUTC.toISOString()} to ${endDateUTC.toISOString()})`);
+        console.warn(`   2. Sensors are configured correctly`);
+        console.warn(`   3. Date format is correct: ${selectedDate}`);
+        console.warn(`   4. Timezone: Local timezone is ${Intl.DateTimeFormat().resolvedOptions().timeZone}, offset: ${tzOffsetMinutes} minutes`);
+        console.warn(`   5. Total records fetched: ${totalRecords} (before date filtering)`);
+      } else {
+        console.log(`📊 Sample timeline points:`, timelineArray.slice(0, 5).map(p => ({
+          time: p.time,
+          timestamp: p.timestamp,
+          sensors: sensors.map(s => {
+            const key = s.nameLower || s.name.toLowerCase();
+            return `${s.name}:${p[key] || 0}`;
+          }).join(', ')
+        })));
+      }
+
+      setTimelineData(timelineArray);
+
+      // Cache the fetch parameters
+      lastTimelineFetchRef.current = {
+        date: selectedDate,
+        sensorCount: sensors.length
+      };
+
+
+    } catch (error) {
+      console.error('❌ Error fetching timeline data:', error);
+      setTimelineData([]);
+    } finally {
+      fetchingTimelineRef.current = false;
+    }
+  };
+
+  // Filter timeline data based on selected shift
+  useEffect(() => {
+    console.log(`🔄 Filtering timeline data for shift: ${selectedShift ? selectedShift.name : 'None'}`);
+    console.log(`   Total timeline data points: ${timelineData.length}`);
+
+    if (timelineData.length > 0 && selectedShift) {
+      const filtered = filterDataByShift(timelineData, selectedShift);
+      console.log(`   Filtered data points: ${filtered.length}`);
+      console.log(`   Filtered data sample:`, filtered.slice(0, 3).map(p => ({
+        time: p.time,
+        timestamp: p.timestamp,
+        sensors: sensors.map(s => {
+          const key = s.nameLower || s.name.toLowerCase();
+          return `${s.name}:${p[key] || 0}`;
+        }).join(', ')
+      })));
+      setFilteredTimelineData(filtered);
+    } else {
+      console.log(`   No shift selected or no timeline data - using all data`);
+      setFilteredTimelineData(timelineData);
+    }
+  }, [timelineData, selectedShift, sensors]);
+
+  const initializeSensors = async () => {
+    try {
+      // Fetch all sensors
+      const response = await api.get('/sensors');
+      const allSensors = response.data;
+
+      // Filter for Switch type sensors dynamically based on database configuration
+      // Shows all active Switch sensors configured in Settings
+      // Preserve original case from database as configured in Settings
+      const switchSensors = allSensors
+        .filter(s => {
+          // Filter by sensor type = 'Switch' (case-insensitive)
+          const sensorType = s.sensor_type?.toLowerCase() || '';
+          return sensorType === 'switch' && s.status === 'active';
+        })
+        .sort((a, b) => {
+          // Sort by name for consistent ordering
+          return (a.name || '').localeCompare(b.name || '', undefined, { numeric: true, sensitivity: 'base' });
+        })
+        .map(s => ({
+          id: s.id,
+          name: s.name, // Use original name from database (preserve case: CH01, ch01, etc.)
+          nameLower: s.name.toLowerCase(), // Keep lowercase version for matching/processing
+          location: s.location_name || 'Unknown',
+          type: s.sensor_type || 'Switch',
+          isActive: false
+        }));
+
+      console.log('📋 Processed switch sensors:', switchSensors.map(s => ({ id: s.id, name: s.name })));
+
+      // REMOVED: No longer creating dummy sensor cards
+      // Only show real sensors from the database
+
+      // REMOVED: No longer setting default active sensor
+      // All sensors start as inactive when there's no real data
+      setActiveSensorId(null);
+      switchSensors.forEach(s => {
+        s.isActive = false;
+      });
+
+      setSensors(switchSensors);
+      setLoading(false);
+
+      console.log(`✅ Loaded ${switchSensors.length} sensors:`, switchSensors.map(s => s.name));
+
+      // Fetch latest sensor data to determine current active sensor
+      fetchLatestSensorData(switchSensors);
+    } catch (error) {
+      console.error('Error fetching sensors:', error);
+      // REMOVED: No longer using dummy data on API failure
+      // Just set empty sensors array
+      setSensors([]);
+      setActiveSensorId(null);
+      setLoading(false);
+    }
+  };
+
+  // Fetch latest sensor data to determine current active sensor and check if payloads are being received
+  const fetchLatestSensorDataRef = useRef(false); // Prevent duplicate calls
+  const lastFetchTimeRef = useRef(0); // Track last fetch time for debouncing
+
+  const fetchLatestSensorData = async (sensorList) => {
+    if (sensorList.length === 0) return;
+
+    // Debounce: Don't fetch if we fetched within the last 10 seconds
+    const now = Date.now();
+    if (now - lastFetchTimeRef.current < 10000) {
+      console.log('📡 Debouncing fetchLatestSensorData - last fetch was less than 10 seconds ago');
+      return;
+    }
+
+    // Prevent duplicate simultaneous calls
+    if (fetchLatestSensorDataRef.current) {
+      console.log('📡 Already fetching latest sensor data, skipping duplicate request');
+      return;
+    }
+
+    fetchLatestSensorDataRef.current = true;
+    lastFetchTimeRef.current = now;
+
+    try {
+      const sensorIds = sensorList.map(s => s.id).join(',');
+      console.log(`📡 Fetching latest data for sensors: ${sensorIds}`);
+      const response = await api.get(`/data/latest?sensor_ids=${sensorIds}`);
+      console.log('📡 Latest sensor data received:', response.data);
+
+      // Check if any recent data exists (within configured timeout) to determine if system is "Live"
+      const timeoutMs = payloadTimeoutMinutes * 60 * 1000;
+      const timeoutAgo = new Date(Date.now() - timeoutMs);
+      let hasRecentLiveData = false;
+      let latestLiveDataTime = null;
+      let hasRecentOfflineData = false;
+      let latestOfflineDataTime = null;
+      let latestDataTime = null;
+
+      if (response.data && response.data.length > 0) {
+        response.data.forEach(d => {
+          if (d.timestamp) {
+            const dataTime = new Date(d.timestamp);
+            const isRecent = dataTime >= timeoutAgo;
+
+            if (isRecent) {
+              // Track the latest data time regardless of status
+              if (!latestDataTime || dataTime > latestDataTime) {
+                latestDataTime = dataTime;
+              }
+
+              // Check data_status to determine if it's live or offline
+              if (d.data_status === 'live') {
+                hasRecentLiveData = true;
+                if (!latestLiveDataTime || dataTime > latestLiveDataTime) {
+                  latestLiveDataTime = dataTime;
+                }
+              } else if (d.data_status === 'offline') {
+                hasRecentOfflineData = true;
+                if (!latestOfflineDataTime || dataTime > latestOfflineDataTime) {
+                  latestOfflineDataTime = dataTime;
+                }
+              }
+            }
+          }
+        });
+      }
+
+      // Set payloadReceived based on data_status: true only if we have recent LIVE data
+      // If we only have offline data or no recent data, set to false
+      if (hasRecentLiveData && latestLiveDataTime) {
+        setPayloadReceived(true);
+        setLastPayloadTime(latestLiveDataTime);
+        console.log('✅ Recent live payload data found - marking as Live');
+
+        // Only set active sensor states if we have recent live data
+        setSensors(prevSensors =>
+          prevSensors.map(s => {
+            // Find data for this sensor
+            const sensorData = response.data.find(d =>
+              d.sensor_id === s.id &&
+              d.timestamp &&
+              new Date(d.timestamp) >= timeoutAgo &&
+              d.data_status === 'live'
+            );
+
+            if (sensorData) {
+              const value = parseFloat(sensorData.value);
+              const isActive = value === 1 || value === "1" || sensorData.value === 1 || sensorData.value === "1";
+              return {
+                ...s,
+                isActive: isActive
+              };
+            }
+
+            return {
+              ...s,
+              isActive: false // Default to inactive if no recent data found
+            };
+          })
+        );
+
+        // Update activeSensorId (legacy support - just set to first active or null)
+        // We'll keep this variable for backward compatibility but UI will handle multiple
+        setActiveSensorId(null); // Reset first
+      } else {
+        // No recent live data - set to Offline and reset all sensors to inactive
+        setPayloadReceived(false);
+
+        // If we have recent offline data, show its timestamp; otherwise null
+        if (hasRecentOfflineData && latestOfflineDataTime) {
+          setLastPayloadTime(latestOfflineDataTime);
+          console.log('⚠️ Recent offline data detected - marking as Offline and resetting sensors');
+        } else {
+          setLastPayloadTime(null);
+          console.log('⚠️ No recent payload data found - marking as Offline and resetting sensors');
+        }
+
+        setActiveSensorId(null);
+        setSensors(prevSensors =>
+          prevSensors.map(s => ({
+            ...s,
+            isActive: false,
+            value: 0 // Ensure value is 0 (OFF state)
+          }))
+        );
+      }
+
+      // Log detailed data for debugging
+      if (response.data && response.data.length > 0) {
+        console.log('📡 Latest data details:');
+        response.data.forEach(d => {
+          const dataTime = d.timestamp ? new Date(d.timestamp) : null;
+          const isRecent = dataTime && dataTime >= timeoutAgo;
+          const status = d.data_status || 'unknown';
+          console.log(`   - Sensor ID: ${d.sensor_id}, Value: ${d.value}, Status: ${status}, Timestamp: ${d.timestamp} ${isRecent ? '(RECENT)' : '(OLD)'}`);
+        });
+      } else {
+        console.log('⚠️  Latest sensor data array is empty - no data in database yet');
+      }
+    } catch (error) {
+      console.error('❌ Error fetching latest sensor data:', error);
+      console.error('  Full error:', error.response || error.message);
+    } finally {
+      fetchLatestSensorDataRef.current = false;
+    }
+  };
+
+  // WebSocket connection for live updates
+  const socketRef = useRef(null);
+  const sensorsRef = useRef(sensors);
+  const isConnectingRef = useRef(false);
+  const sensorIdsRef = useRef(''); // Track sensor IDs to detect actual changes
+
+  // Update ref when sensors change
+  useEffect(() => {
+    sensorsRef.current = sensors;
+  }, [sensors]);
+
+  useEffect(() => {
+    const token = localStorage.getItem('token');
+    const wsUrl = process.env.REACT_APP_WS_URL || 'http://localhost:5000';
+
+    // Create stable sensor IDs string for comparison
+    const currentSensorIds = sensors.map(s => s.id).sort().join(',');
+
+    // If sensor IDs haven't changed and socket is already connected, skip
+    if (sensorIdsRef.current === currentSensorIds && socketRef.current?.connected) {
+      return;
+    }
+
+    // Prevent duplicate connections
+    if (isConnectingRef.current || (socketRef.current && socketRef.current.connected)) {
+      console.log('🔌 WebSocket already connected or connecting, skipping...');
+      return;
+    }
+
+    console.log('🔌 Initializing WebSocket connection...');
+    console.log('  - WS URL:', wsUrl);
+    console.log('  - Token exists:', !!token);
+    console.log('  - Sensors count:', sensors.length);
+    console.log('  - Sensor IDs:', currentSensorIds);
+
+    if (!token) {
+      console.error('❌ No authentication token found - WebSocket connection aborted');
+      return;
+    }
+
+    if (sensors.length === 0) {
+      // Clean up if no sensors
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+        socketRef.current = null;
+      }
+      sensorIdsRef.current = '';
+      return;
+    }
+
+    // Clean up existing connection only if sensor IDs actually changed
+    if (socketRef.current && sensorIdsRef.current !== currentSensorIds && sensorIdsRef.current !== '') {
+      console.log('🔌 Sensor IDs changed, cleaning up old connection...');
+      console.log('   Old IDs:', sensorIdsRef.current);
+      console.log('   New IDs:', currentSensorIds);
+      socketRef.current.removeAllListeners();
+      socketRef.current.disconnect();
+      socketRef.current = null;
+    }
+
+    isConnectingRef.current = true;
+    sensorIdsRef.current = currentSensorIds;
+
+    // Connect to WebSocket
+    console.log('🔌 Connecting to WebSocket...');
+    const socketInstance = io(wsUrl, {
+      auth: { token },
+      transports: ['websocket', 'polling'],
+      // Reconnection settings
+      reconnection: true,
+      reconnectionDelay: 1000, // Start with 1 second delay
+      reconnectionDelayMax: 5000, // Maximum 5 seconds delay
+      reconnectionAttempts: Infinity, // Keep trying to reconnect
+      timeout: 20000, // Connection timeout (20 seconds)
+      // Force new connection
+      forceNew: true, // Changed to true to avoid connection reuse issues
+      // Upgrade from polling to websocket
+      upgrade: true,
+      // Add ping/pong settings for better connection stability
+      pingTimeout: 60000, // 60 seconds
+      pingInterval: 25000 // 25 seconds
+    });
+
+    socketRef.current = socketInstance;
+
+    socketInstance.on('connect', () => {
+      console.log('✅✅✅ WebSocket CONNECTED for Switch Sensors');
+      setWsConnected(true);
+      isConnectingRef.current = false;
+      // Join all sensor rooms
+      const currentSensors = sensorsRef.current;
+      console.log(`✅ Joining ${currentSensors.length} sensor rooms...`);
+      currentSensors.forEach(sensor => {
+        socketInstance.emit('join_room', `sensor_${sensor.id}`);
+        console.log(`✅ Joined room: sensor_${sensor.id} (${sensor.name})`);
+      });
+    });
+
+    socketInstance.on('connect_error', (error) => {
+      console.error('❌❌❌ WebSocket CONNECTION ERROR:', error);
+      console.error('   Error details:', {
+        message: error.message,
+        type: error.type,
+        description: error.description
+      });
+      setWsConnected(false);
+      isConnectingRef.current = false;
+    });
+
+    socketInstance.on('reconnect', (attemptNumber) => {
+      console.log(`🔄✅ WebSocket RECONNECTED after ${attemptNumber} attempts`);
+      setWsConnected(true);
+      // Rejoin all sensor rooms after reconnection
+      const currentSensors = sensorsRef.current;
+      console.log(`✅ Rejoining ${currentSensors.length} sensor rooms after reconnect...`);
+      currentSensors.forEach(sensor => {
+        socketInstance.emit('join_room', `sensor_${sensor.id}`);
+        console.log(`✅ Rejoined room: sensor_${sensor.id} (${sensor.name})`);
+      });
+    });
+
+    socketInstance.on('reconnect_attempt', (attemptNumber) => {
+      console.log(`🔄 Reconnection attempt ${attemptNumber}...`);
+      setWsConnected(false);
+    });
+
+    socketInstance.on('reconnect_error', (error) => {
+      console.error('❌ Reconnection error:', error);
+    });
+
+    socketInstance.on('reconnect_failed', () => {
+      console.error('❌❌❌ WebSocket reconnection FAILED - giving up');
+      setWsConnected(false);
+    });
+
+    // Listen for sensor updates
+    socketInstance.on('sensor_update', (data) => {
+      console.log('🔴🔴🔴 LIVE UPDATE RECEIVED:', data);
+      console.log('  - Sensor ID:', data.sensor_id);
+      console.log('  - Sensor Name:', data.sensor_name);
+      console.log('  - Value:', data.value);
+      console.log('  - Timestamp:', data.timestamp);
+      console.log('  - Data Status:', data.data_status || 'live (default)');
+      console.log('  - Full data object:', JSON.stringify(data, null, 2));
+
+      // Check data_status from WebSocket message - only mark as Live if data_status is 'live'
+      const isLiveData = data.data_status === 'live' || !data.data_status; // Default to 'live' if not specified (backward compatibility)
+
+      // Create now variable before if/else so it's accessible for status indicators
+      const now = new Date();
+
+      if (isLiveData) {
+        // Mark that actual payload has been received (only for live data)
+        setPayloadReceived(true);
+        setLastPayloadTime(now);
+      } else {
+        // If data_status is 'offline', mark as offline
+        console.log('⚠️ SwitchSensors: Received offline status from WebSocket');
+        setPayloadReceived(false);
+        setLastPayloadTime(now);
+      }
+
+      // Update status indicators
+      setLastUpdateTime(now.toLocaleTimeString());
+      setUpdateCount(prev => prev + 1);
+
+      // Force a visual update indicator
+      console.log('🎨 Updating UI with new sensor data...');
+
+      // Update sensor active state based on value - STATE IS RETAINED until explicitly updated
+      if (data.sensor_id && data.sensor_name) {
+        const sensorValue = parseFloat(data.value);
+        const isActive = sensorValue === 1;
+
+        console.log(`🔴 Processing update for sensor_id=${data.sensor_id}, sensor_name=${data.sensor_name}, value=${sensorValue}, isActive=${isActive}`);
+
+        setSensors(prevSensors => {
+          const updated = prevSensors.map(sensor => {
+            // Update the sensor that received the message - this is the new state from payload
+            if (sensor.id === data.sensor_id) {
+              console.log(`🔴 ✅ Updating ${sensor.name} (ID: ${sensor.id}) to ${isActive ? 'ACTIVE' : 'INACTIVE'} - State retained until next payload`);
+              return {
+                ...sensor,
+                isActive: isActive
+              };
+            }
+            // Keep other sensors in their current state - they retain their value until explicitly updated
+            // NO MUTUAL EXCLUSIVITY: We do NOT turn off other sensors here.
+            return sensor;
+          });
+
+          const activeSensors = updated.filter(s => s.isActive);
+          console.log(`🔴 Final state - Active sensors: ${activeSensors.length > 0 ? activeSensors.map(s => s.name).join(', ') : 'None'}`);
+          console.log(`🔴 All sensors state:`, updated.map(s => `${s.name}=${s.isActive ? 'ON' : 'OFF'}`).join(', '));
+
+          // Update activeSensorId just for compatibility, though we prioritize displaying multiple
+          if (activeSensors.length > 0) {
+            setActiveSensorId(activeSensors[0].id);
+          } else {
+            setActiveSensorId(null);
+          }
+
+          return updated;
+        });
+
+        // Update timeline data with new point
+        const time = new Date(data.timestamp);
+
+        // Convert timestamp to local date string for comparison (YYYY-MM-DD format)
+        // This handles timezone correctly by using local date components
+        const year = time.getFullYear();
+        const month = String(time.getMonth() + 1).padStart(2, '0');
+        const day = String(time.getDate()).padStart(2, '0');
+        const localDateStr = `${year}-${month}-${day}`;
+
+        console.log('🔴 Date comparison:');
+        console.log('  - Timestamp received:', data.timestamp);
+        console.log('  - Parsed date object:', time.toString());
+        console.log('  - Local date string:', localDateStr);
+        console.log('  - Selected date:', selectedDate);
+        console.log('  - Match?', localDateStr === selectedDate);
+
+        // Only add if it's for the selected date (compare in local timezone)
+        if (localDateStr === selectedDate) {
+          console.log('🔴 ✅ Date matches! Adding to timeline for', data.sensor_name);
+          setTimelineData(prevData => {
+            const newPoint = {
+              timestamp: data.timestamp
+            };
+
+            // Initialize all sensors to 0 - use nameLower for data keys to match timeline format
+            sensorsRef.current.forEach(s => {
+              const keyName = s.nameLower || s.name.toLowerCase();
+              newPoint[keyName] = 0;
+            });
+
+            // Set the active sensor to 1 - match by case-insensitive name
+            if (data.sensor_name) {
+              const sensorNameLower = data.sensor_name.toLowerCase();
+              // Find matching sensor
+              const matchingSensor = sensorsRef.current.find(s => {
+                const sNameLower = s.nameLower || s.name.toLowerCase();
+                return sNameLower === sensorNameLower;
+              });
+
+              if (matchingSensor) {
+                const keyName = matchingSensor.nameLower || matchingSensor.name.toLowerCase();
+                newPoint[keyName] = parseFloat(data.value);
+              }
+            }
+
+            // Check if we already have data for this time slot (15-minute intervals)
+            // Use local time for display (the time variable is already in local timezone)
+            const roundedMinutes = Math.floor(time.getMinutes() / 15) * 15;
+            const hours = time.getHours();
+            const timeKey = `${String(hours).padStart(2, '0')}:${String(roundedMinutes).padStart(2, '0')}`;
+            newPoint.time = timeKey;
+
+            console.log('🔴 Adding timeline point:');
+            console.log('  - Time key:', timeKey);
+            console.log('  - Sensor:', data.sensor_name);
+            console.log('  - Value:', data.value);
+            console.log('  - All sensor values:', Object.keys(newPoint).filter(k => k !== 'time' && k !== 'timestamp').map(k => `${k}:${newPoint[k]}`).join(', '));
+
+            const existingIndex = prevData.findIndex(p => p.time === timeKey);
+
+            if (existingIndex >= 0) {
+              // Update existing point
+              console.log('🔴 Updating existing point at', timeKey);
+              const updated = [...prevData];
+              updated[existingIndex] = {
+                ...updated[existingIndex],
+                ...newPoint
+              };
+              return updated;
+            } else {
+              // Add new point
+              console.log('🔴 Adding new point at', timeKey);
+              return [...prevData, newPoint].sort((a, b) => {
+                const [hA, mA] = a.time.split(':').map(Number);
+                const [hB, mB] = b.time.split(':').map(Number);
+                return (hA * 60 + mA) - (hB * 60 + mB);
+              });
+            }
+          });
+        } else {
+          console.log('🔴 ❌ Date mismatch - not adding to timeline');
+        }
+      }
+    });
+
+    socketInstance.on('disconnect', (reason) => {
+      console.log(`❌ WebSocket DISCONNECTED. Reason: ${reason}`);
+      console.log(`   Will attempt to reconnect: ${reason === 'io server disconnect' ? 'No (server disconnected)' : 'Yes'}`);
+      setWsConnected(false);
+      isConnectingRef.current = false;
+
+      // If server disconnected us, don't try to reconnect automatically
+      if (reason === 'io server disconnect') {
+        console.log('⚠️  Server disconnected client - manual reconnection may be required');
+      }
+    });
+
+    // Handle socket errors
+    socketInstance.on('error', (error) => {
+      console.error('❌ WebSocket error:', error);
+    });
+
+    return () => {
+      isConnectingRef.current = false;
+
+      if (socketInstance) {
+        // Only cleanup if this is a real unmount, not just a dependency change
+        if (socketRef.current === socketInstance) {
+          console.log('🔌 Cleaning up WebSocket connection...');
+
+          // Remove all event listeners to prevent memory leaks
+          socketInstance.removeAllListeners();
+
+          // Leave all rooms
+          sensorsRef.current.forEach(sensor => {
+            try {
+              socketInstance.emit('leave_room', `sensor_${sensor.id}`);
+            } catch (e) {
+              console.warn('⚠️  Error leaving room:', e);
+            }
+          });
+
+          // Disconnect if still connected
+          if (socketInstance.connected) {
+            socketInstance.disconnect();
+          }
+
+          socketRef.current = null;
+        }
+      }
+    };
+  }, [sensors.map(s => s.id).join(',')]); // Only depend on sensor IDs, not array reference
+
+  // Periodic check for offline state - if no payload received within timeout, mark as offline
+  useEffect(() => {
+    const OFFLINE_TIMEOUT_MS = payloadTimeoutMinutes * 60 * 1000; // Use configurable timeout
+
+    const checkOfflineStatus = () => {
+      if (payloadReceived && lastPayloadTime) {
+        const timeSinceLastPayload = Date.now() - lastPayloadTime.getTime();
+
+        if (timeSinceLastPayload > OFFLINE_TIMEOUT_MS) {
+          console.log(`⚠️  No payload received for ${Math.round(timeSinceLastPayload / 1000 / 60)} minutes - marking as OFFLINE`);
+          console.log('   Setting all sensors to OFF state');
+
+          // Mark as offline
+          setPayloadReceived(false);
+
+          // Reset all sensors to inactive
+          setActiveSensorId(null);
+          setSensors(prevSensors =>
+            prevSensors.map(s => ({
+              ...s,
+              isActive: false
+            }))
+          );
+
+          console.log('✅ All sensors reset to OFF - system marked as Offline');
+        }
+      } else if (payloadReceived && !lastPayloadTime) {
+        // If payloadReceived is true but no lastPayloadTime, reset it
+        console.log('⚠️  payloadReceived is true but no lastPayloadTime - resetting to offline');
+        setPayloadReceived(false);
+      }
+    };
+
+    // Check immediately
+    checkOfflineStatus();
+
+    // Check every 30 seconds
+    const interval = setInterval(checkOfflineStatus, 30 * 1000);
+
+    return () => {
+      clearInterval(interval);
+    };
+  }, [payloadReceived, lastPayloadTime, payloadTimeoutMinutes]);
+
+
+  // Calculate summary metrics based on filtered data
+  const summaryMetrics = useMemo(() => {
+    const dataToUse = filteredTimelineData.length > 0 ? filteredTimelineData : timelineData;
+    if (!dataToUse.length || !sensors.length) {
+      return {
+        durations: {},
+        switchCount: 0,
+        chartData: []
+      };
+    }
+
+    const durations = {};
+    let switchCount = 0;
+    let previousActiveSensor = null;
+
+    // Initialize durations using original database names (preserve case)
+    sensors.forEach(sensor => {
+      durations[sensor.name] = 0;
+      // Also check lowercase version for backward compatibility
+      if (sensor.nameLower && sensor.nameLower !== sensor.name) {
+        durations[sensor.nameLower] = 0;
+      }
+    });
+
+    // Calculate actual durations based on timestamps (not fixed 15-minute intervals)
+    // IMPORTANT: Only count durations within the shift period boundaries
+    dataToUse.forEach((point, index) => {
+      // Get timestamp for current point in local timezone
+      const currentTime = point.fullTimestamp
+        ? new Date(point.fullTimestamp)
+        : point.timestamp
+          ? new Date(point.timestamp)
+          : null;
+
+      if (!currentTime) return; // Skip if no valid timestamp
+
+      // Get current time in local timezone
+      const currentHour = currentTime.getHours();
+      const currentMin = currentTime.getMinutes();
+      const currentMinutes = currentHour * 60 + currentMin;
+
+      // Verify this point is within shift boundaries if shift is selected
+      if (selectedShift && selectedShift.start_time && selectedShift.end_time) {
+        const [startHour, startMin] = selectedShift.start_time.slice(0, 5).split(':').map(Number);
+        const [endHour, endMin] = selectedShift.end_time.slice(0, 5).split(':').map(Number);
+        const shiftStartMinutes = startHour * 60 + startMin;
+        const shiftEndMinutes = endHour * 60 + endMin;
+        const isOvernight = shiftEndMinutes <= shiftStartMinutes;
+
+        // Check if point is within shift period (in local timezone)
+        let isInShift = false;
+        if (isOvernight) {
+          // Overnight shift: current time >= start OR current time <= end
+          isInShift = currentMinutes >= shiftStartMinutes || currentMinutes <= shiftEndMinutes;
+        } else {
+          // Normal shift: current time >= start AND current time <= end
+          isInShift = currentMinutes >= shiftStartMinutes && currentMinutes <= shiftEndMinutes;
+        }
+
+        if (!isInShift) {
+          // Point is outside shift boundaries - skip it
+          return;
+        }
+      }
+
+      // Try to find active sensor by checking both original name and lowercase
+      const activeSensor = sensors.find(s => {
+        // Check original name first
+        if (point[s.name] === 1) return true;
+        // Check lowercase version if different
+        if (s.nameLower && point[s.nameLower] === 1) return true;
+        return false;
+      });
+
+      if (activeSensor && activeSensor.name !== previousActiveSensor) {
+        if (previousActiveSensor !== null) {
+          switchCount++;
+        }
+        previousActiveSensor = activeSensor.name;
+      }
+
+      // Calculate duration based on actual timestamps
+      // Use the time difference between this point and the next point (or shift end)
+      // CRITICAL: Only count duration up to shift end time, not beyond
+      if (activeSensor) {
+        let durationMinutes = 0;
+
+        if (index < dataToUse.length - 1) {
+          // Calculate duration until next point
+          const nextPoint = dataToUse[index + 1];
+          const nextTime = nextPoint.fullTimestamp
+            ? new Date(nextPoint.fullTimestamp)
+            : nextPoint.timestamp
+              ? new Date(nextPoint.timestamp)
+              : null;
+
+          if (nextTime) {
+            // Get next point time in local timezone
+            const nextHour = nextTime.getHours();
+            const nextMin = nextTime.getMinutes();
+            const nextMinutes = nextHour * 60 + nextMin;
+
+            // Ensure we don't count duration beyond shift end
+            if (selectedShift && selectedShift.end_time) {
+              const [endHour, endMin] = selectedShift.end_time.slice(0, 5).split(':').map(Number);
+              const shiftEndMinutes = endHour * 60 + endMin;
+              const [startHour, startMin] = selectedShift.start_time.slice(0, 5).split(':').map(Number);
+              const shiftStartMinutes = startHour * 60 + startMin;
+              const isOvernight = shiftEndMinutes <= shiftStartMinutes;
+
+              // Calculate shift end in absolute time
+              const shiftEndTime = new Date(currentTime);
+              shiftEndTime.setHours(endHour, endMin, 0, 0);
+              if (isOvernight && currentMinutes < shiftEndMinutes) {
+                shiftEndTime.setDate(shiftEndTime.getDate() + 1);
+              }
+
+              // Use the minimum of: time to next point OR time to shift end
+              const timeToNextPoint = (nextTime - currentTime) / (1000 * 60);
+              const timeToShiftEnd = Math.max(0, (shiftEndTime - currentTime) / (1000 * 60));
+              durationMinutes = Math.min(timeToNextPoint, timeToShiftEnd);
+            } else {
+              durationMinutes = (nextTime - currentTime) / (1000 * 60); // Convert ms to minutes
+            }
+          } else {
+            // If no next point, calculate to shift end
+            if (selectedShift && selectedShift.end_time) {
+              const [endHour, endMin] = selectedShift.end_time.slice(0, 5).split(':').map(Number);
+              const shiftEndTime = new Date(currentTime);
+              shiftEndTime.setHours(endHour, endMin, 0, 0);
+
+              const [startHour, startMin] = selectedShift.start_time.slice(0, 5).split(':').map(Number);
+              const shiftStartMinutes = startHour * 60 + startMin;
+              const shiftEndMinutes = endHour * 60 + endMin;
+              const isOvernight = shiftEndMinutes <= shiftStartMinutes;
+
+              if (isOvernight && currentMinutes < shiftEndMinutes) {
+                shiftEndTime.setDate(shiftEndTime.getDate() + 1);
+              }
+
+              durationMinutes = Math.max(0, (shiftEndTime - currentTime) / (1000 * 60));
+            } else {
+              durationMinutes = 15; // Fallback
+            }
+          }
+        } else {
+          // Last point - calculate duration until shift end (if shift selected)
+          if (selectedShift && selectedShift.end_time) {
+            // Use local time components to match shift times (which are in local timezone)
+            const [endHour, endMin] = selectedShift.end_time.slice(0, 5).split(':').map(Number);
+            const shiftEndTime = new Date(currentTime);
+            shiftEndTime.setHours(endHour, endMin, 0, 0);
+
+            // Handle overnight shifts - shift times are in local timezone
+            const [startHour, startMin] = selectedShift.start_time.slice(0, 5).split(':').map(Number);
+            const shiftStartMinutes = startHour * 60 + startMin;
+            const shiftEndMinutes = endHour * 60 + endMin;
+            const isOvernight = shiftEndMinutes <= shiftStartMinutes;
+
+            if (isOvernight && currentMinutes < shiftEndMinutes) {
+              // Current time is after midnight but before shift end (overnight shift)
+              shiftEndTime.setDate(shiftEndTime.getDate() + 1);
+            } else if (!isOvernight && currentMinutes >= shiftEndMinutes) {
+              // Normal shift but we're past shift end - duration should be 0
+              durationMinutes = 0;
+            } else {
+              // Calculate duration until shift end
+              durationMinutes = Math.max(0, (shiftEndTime - currentTime) / (1000 * 60));
+            }
+          } else {
+            // No shift or no timestamp - use fallback
+            durationMinutes = 15;
+          }
+        }
+
+        // Ensure duration is non-negative and within shift bounds
+        durationMinutes = Math.max(0, durationMinutes);
+
+        durations[activeSensor.name] = (durations[activeSensor.name] || 0) + durationMinutes;
+        // Also update lowercase if different
+        if (activeSensor.nameLower && activeSensor.nameLower !== activeSensor.name) {
+          durations[activeSensor.nameLower] = (durations[activeSensor.nameLower] || 0) + durationMinutes;
+        }
+      }
+    });
+
+    // Calculate total duration for percentage calculation
+    // ALWAYS use shift duration as the base for percentages (shift times are in local timezone)
+    let totalDurationMinutes = 0;
+    if (selectedShift && selectedShift.start_time && selectedShift.end_time) {
+      // Shift times are stored as HH:mm in local timezone
+      const [startHour, startMin] = selectedShift.start_time.slice(0, 5).split(':').map(Number);
+      const [endHour, endMin] = selectedShift.end_time.slice(0, 5).split(':').map(Number);
+      const shiftStartMinutes = startHour * 60 + startMin;
+      const shiftEndMinutes = endHour * 60 + endMin;
+      const isOvernight = shiftEndMinutes <= shiftStartMinutes;
+
+      if (isOvernight) {
+        // Overnight shift: e.g., 22:00 - 06:00 = 8 hours = 480 minutes
+        totalDurationMinutes = (24 * 60 - shiftStartMinutes) + shiftEndMinutes;
+      } else {
+        // Normal shift: e.g., 06:00 - 14:00 = 8 hours = 480 minutes
+        totalDurationMinutes = shiftEndMinutes - shiftStartMinutes;
+      }
+
+      console.log(`📊 Shift duration calculation:`);
+      console.log(`   Shift: ${selectedShift.name} (${selectedShift.start_time} - ${selectedShift.end_time})`);
+      console.log(`   Start minutes: ${shiftStartMinutes}, End minutes: ${shiftEndMinutes}`);
+      console.log(`   Overnight: ${isOvernight}`);
+      console.log(`   Total shift duration: ${totalDurationMinutes} minutes (${(totalDurationMinutes / 60).toFixed(2)} hours)`);
+    } else {
+      // No shift selected - use sum of all sensor durations as fallback
+      // Note: This should rarely happen as shifts should always be selected
+      console.warn('⚠️  No shift selected - using sum of sensor durations for percentage calculation');
+      Object.values(durations).forEach(duration => {
+        totalDurationMinutes += duration;
+      });
+    }
+
+    // Convert to hours and minutes - use original database names
+    const formattedDurations = {};
+    sensors.forEach(sensor => {
+      // Use original database name for lookup
+      const minutes = durations[sensor.name] || durations[sensor.nameLower] || 0;
+      const hours = Math.floor(minutes / 60);
+      const mins = Math.round(minutes % 60);
+      formattedDurations[sensor.name] = {
+        hours,
+        minutes: mins,
+        totalMinutes: minutes,
+        percentage: totalDurationMinutes > 0 ? (minutes / totalDurationMinutes) * 100 : 0
+      };
+    });
+
+    console.log(`📊 Duration calculation summary (SHIFT-BASED):`);
+    console.log(`   Selected shift: ${selectedShift ? `${selectedShift.name} (${selectedShift.start_time} - ${selectedShift.end_time})` : 'None'}`);
+    console.log(`   Total shift duration: ${totalDurationMinutes} minutes (${(totalDurationMinutes / 60).toFixed(2)} hours)`);
+    console.log(`   Data points processed: ${dataToUse.length}`);
+    console.log(`   Sensor durations (within shift period only):`);
+    sensors.forEach(sensor => {
+      const duration = formattedDurations[sensor.name];
+      if (duration.totalMinutes > 0) {
+        console.log(`     ${sensor.name}: ${duration.hours}h ${duration.minutes}m (${duration.percentage.toFixed(2)}% of shift duration)`);
+      }
+    });
+
+    // Verify: Sum of percentages should not exceed 100% (sensors are mutually exclusive)
+    const totalPercentage = Object.values(formattedDurations).reduce((sum, d) => sum + d.percentage, 0);
+    if (totalPercentage > 100.1) { // Allow small floating point error
+      console.warn(`⚠️  Warning: Total percentage exceeds 100%: ${totalPercentage.toFixed(2)}% - This may indicate overlapping durations`);
+    } else {
+      console.log(`   Total percentage: ${totalPercentage.toFixed(2)}% (should be ≤100% as sensors are mutually exclusive)`);
+    }
+
+    // Prepare data for pie chart
+    const chartData = sensors.map(sensor => ({
+      name: sensor.name,
+      value: formattedDurations[sensor.name].totalMinutes,
+      percentage: formattedDurations[sensor.name].percentage.toFixed(1)
+    }));
+
+    return {
+      durations: formattedDurations,
+      switchCount,
+      chartData
+    };
+  }, [filteredTimelineData, timelineData, sensors, selectedShift, payloadReceived, lastPayloadTime]);
+
+  // Calculate which shift is currently active based on current time
+  const getCurrentActiveShift = useMemo(() => {
+    if (!shifts || shifts.length === 0) return null;
+
+    const now = new Date();
+    const currentHours = now.getHours();
+    const currentMinutes = now.getMinutes();
+    const currentTotalMinutes = currentHours * 60 + currentMinutes;
+
+    // Find the shift that matches the current time
+    for (const shift of shifts) {
+      if (!shift.start_time || !shift.end_time || !shift.is_active) continue;
+
+      const [startHour, startMin] = shift.start_time.slice(0, 5).split(':').map(Number);
+      const [endHour, endMin] = shift.end_time.slice(0, 5).split(':').map(Number);
+
+      const startTotalMinutes = startHour * 60 + startMin;
+      const endTotalMinutes = endHour * 60 + endMin;
+
+      // Check if shift is overnight (end time is less than start time, e.g., 22:00 - 06:00)
+      const isOvernight = endTotalMinutes <= startTotalMinutes;
+
+      let isInShift = false;
+      if (isOvernight) {
+        // Overnight shift: current time >= start OR current time <= end
+        isInShift = currentTotalMinutes >= startTotalMinutes || currentTotalMinutes <= endTotalMinutes;
+      } else {
+        // Normal shift: current time >= start AND current time <= end
+        isInShift = currentTotalMinutes >= startTotalMinutes && currentTotalMinutes <= endTotalMinutes;
+      }
+
+      if (isInShift) {
+        return shift;
+      }
+    }
+
+    return null;
+  }, [shifts]);
+
+  const COLORS = ['#10b981', '#3b82f6', '#8b5cf6', '#f59e0b', '#ef4444', '#06b6d4', '#8884d8', '#82ca9d', '#ffc658', '#ff8042', '#0088FE', '#00C49F'];
+
+  // Transform timeline data into a multi-row Gantt chart style
+  const timelineBarData = useMemo(() => {
+    // Basic validation
+    if (!sensors.length || !selectedShift) {
+      return [];
+    }
+
+    // 1. Determine Shift Boundaries (in minutes from midnight)
+    const [startHour, startMin] = selectedShift.start_time.slice(0, 5).split(':').map(Number);
+    const shiftStartMinutes = startHour * 60 + startMin;
+
+    const [endHour, endMin] = selectedShift.end_time.slice(0, 5).split(':').map(Number);
+    let shiftEndMinutes = endHour * 60 + endMin;
+
+    const isOvernight = shiftEndMinutes <= shiftStartMinutes;
+    if (isOvernight) {
+      shiftEndMinutes += 24 * 60; // Add 24h for overnight calculation
+    }
+
+    const bars = [];
+
+    // Helper to get clock minutes for a point (handling overnight wrap)
+    const getClockMinutes = (point) => {
+      let time;
+      if (point.fullTimestamp) {
+        time = new Date(point.fullTimestamp);
+      } else if (point.timestamp) {
+        time = new Date(point.timestamp);
+      } else {
+        const [h, m] = point.time.split(':').map(Number);
+        return h * 60 + m; // Fallback
+      }
+
+      // Convert to target timezone
+      const timeStr = time.toLocaleTimeString('en-US', {
+        hour12: false,
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        timeZone: timezone
+      });
+      const [h, m, s] = timeStr.split(':').map(Number);
+
+      let minutes = h * 60 + m + (s / 60);
+
+      // If overnight shift, and time is early morning (e.g. 01:00) but shift started previous night (23:00)
+      if (isOvernight && minutes < shiftStartMinutes) {
+        minutes += 24 * 60;
+      }
+      return minutes;
+    };
+
+    // 2. Process each sensor independently to create its own row of bars
+    sensors.forEach((sensor, sensorIdx) => {
+      const keyName = sensor.nameLower || sensor.name.toLowerCase();
+
+      // Get all state change events for this sensor
+      const sensorEvents = timelineData.map(point => {
+        // Check if this sensor is active at this point
+        const val = point[keyName] !== undefined ? point[keyName] : point[sensor.name];
+        const isActive = val == 1 || val === "1" || val === true;
+
+        return {
+          minutes: getClockMinutes(point),
+          isActive: isActive
+        };
+      }).sort((a, b) => a.minutes - b.minutes);
+
+      // Determine initial state (before shift start)
+      // Look for the last event before shiftStartMinutes
+      let isCurrentlyActive = false;
+      for (let i = sensorEvents.length - 1; i >= 0; i--) {
+        if (sensorEvents[i].minutes <= shiftStartMinutes) {
+          isCurrentlyActive = sensorEvents[i].isActive;
+          break;
+        }
+      }
+
+      let currentStart = shiftStartMinutes;
+
+      // Filter events to those strictly AFTER shiftStartMinutes and BEFORE/AT shiftEndMinutes
+      const relevantEvents = sensorEvents.filter(e => e.minutes > shiftStartMinutes && e.minutes <= shiftEndMinutes);
+
+      relevantEvents.forEach(event => {
+        // If state changed, end current segment and start new one
+        if (isCurrentlyActive) {
+          // Closing an active segment
+          if (event.minutes > currentStart) {
+            bars.push({
+              sensor: sensor.name,
+              sensorIndex: sensorIdx, // Y-axis row index
+              start: currentStart,
+              end: event.minutes,
+              color: '#10b981', // Green for ON
+              isActive: true
+            });
+          }
+        }
+
+        // Update state
+        currentStart = event.minutes;
+        isCurrentlyActive = event.isActive;
+      });
+
+      // Handle the final segment (from last event to shift end)
+      let finalEnd = shiftEndMinutes;
+
+      // If offline, cap the valid data at lastPayloadTime
+      if (!payloadReceived && lastPayloadTime) {
+        const lpDate = new Date(lastPayloadTime);
+        const timeStr = lpDate.toLocaleTimeString('en-US', {
+          hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: timezone
+        });
+        const [h, m, s] = timeStr.split(':').map(Number);
+        let lpMinutes = h * 60 + m + (s / 60);
+        if (isOvernight && lpMinutes < shiftStartMinutes) lpMinutes += 24 * 60;
+
+        // If cutoff is within this remaining segment
+        if (lpMinutes > currentStart && lpMinutes < shiftEndMinutes) {
+          finalEnd = lpMinutes;
+        }
+      }
+
+      // Add final bar if currently active
+      if (isCurrentlyActive && currentStart < finalEnd) {
+        bars.push({
+          sensor: sensor.name,
+          sensorIndex: sensorIdx,
+          start: currentStart,
+          end: finalEnd,
+          color: '#10b981',
+          isActive: true
+        });
+      }
+    });
+
+    return bars;
+
+  }, [timelineData, sensors, selectedShift, payloadReceived, lastPayloadTime, timezone]);
+
+  // Custom tooltip for timeline bar chart
+  const TimelineBarTooltip = ({ active, payload, label }) => {
+    if (active && payload && payload.length) {
+      // Find the bar data 
+      const bar = payload[0].payload;
+      if (!bar) return null;
+
+      const duration = bar.end - bar.start;
+      const hours = Math.floor(duration / 60);
+      const mins = Math.floor(duration % 60);
+
+      // Convert start and end times (clock minutes) to HH:mm format
+      let startHours = Math.floor(bar.start / 60);
+      let startMins = Math.floor(bar.start % 60);
+      let endHours = Math.floor(bar.end / 60);
+      let endMins = Math.floor(bar.end % 60);
+
+      // Handle overnight shifts: wrap hours >= 24 back to 0-23
+      if (startHours >= 24) startHours %= 24;
+      if (endHours >= 24) endHours %= 24;
+
+      return (
+        <div className="bg-white p-2 border border-gray-300 shadow-md rounded">
+          <p className="font-bold">{bar.sensor}</p>
+          <p>{`Status: ${bar.isActive ? 'ON' : 'OFF'}`}</p>
+          <p>{`Duration: ${hours > 0 ? `${hours}h ` : ''}${mins}m`}</p>
+          <p>{`Time: ${String(startHours).padStart(2, '0')}:${String(startMins).padStart(2, '0')} - ${String(endHours).padStart(2, '0')}:${String(endMins).padStart(2, '0')}`}</p>
+        </div>
+      );
+    }
+    return null;
+  };
+
+  const CustomTooltip = ({ active, payload, label }) => {
+    if (active && payload && payload.length) {
+      const activeSensor = payload.find(p => p.value === 1);
+      if (activeSensor) {
+        return (
+          <div className="bg-white p-3 border border-gray-200 rounded-lg shadow-lg">
+            <p className="font-semibold">{`Time: ${label}`}</p>
+            <p className="text-green-600 font-medium">{`Active: ${activeSensor.name}`}</p>
+          </div>
+        );
+      }
+    }
+    return null;
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="text-lg">Loading switch sensors...</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="container mx-auto px-4 py-8">
+      <div className="mb-6">
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-3xl font-bold mb-2">Switch Sensors Control</h1>
+            <p className="text-gray-600">Real-time status of switch sensors</p>
+          </div>
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2">
+              <div className={`w-3 h-3 rounded-full ${payloadReceived ? 'bg-green-500' : 'bg-gray-400'} ${payloadReceived ? 'animate-pulse' : ''}`}></div>
+              <span className="text-sm text-gray-600 font-medium">
+                {payloadReceived ? 'Live' : 'Offline'}
+              </span>
+            </div>
+            {payloadReceived && (
+              <div className="text-xs text-gray-500">
+                Updates: {updateCount} | Last: {lastPayloadTime ? lastPayloadTime.toLocaleTimeString() : lastUpdateTime || 'None'}
+              </div>
+            )}
+            {payloadReceived && sensors.some(s => s.isActive) && (
+              <span className="text-xs bg-green-100 text-green-800 px-2 py-1 rounded">
+                Active: {sensors.filter(s => s.isActive).map(s => s.name).join(', ')}
+              </span>
+            )}
+          </div>
+        </div>
+        {process.env.NODE_ENV === 'development' && (
+          <div className="mt-2 text-xs text-gray-500">
+            Selected Date: {selectedDate} | WebSocket: {wsConnected ? 'Connected' : 'Disconnected'}
+          </div>
+        )}
+      </div>
+
+      {/* Date and Shift Selector */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Select Date
+          </label>
+          <input
+            type="date"
+            value={selectedDate}
+            onChange={(e) => setSelectedDate(e.target.value)}
+            className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
+          />
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Select Shift {user?.role === 'operator' && '(Your Shift)'}
+          </label>
+          <select
+            value={selectedShiftId || ''}
+            onChange={(e) => {
+              const shiftId = parseInt(e.target.value);
+              const shift = shifts.find(s => s.id === shiftId);
+              setSelectedShiftId(shiftId);
+              setSelectedShift(shift || null);
+            }}
+            disabled={user?.role === 'operator'}
+            className={`w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 ${user?.role === 'operator' ? 'bg-gray-100 cursor-not-allowed' : ''
+              }`}
+          >
+            <option value="">All Shifts (24 Hours)</option>
+            {shifts.map(shift => (
+              <option key={shift.id} value={shift.id}>
+                {shift.name} ({shift.start_time.slice(0, 5)} - {shift.end_time.slice(0, 5)})
+              </option>
+            ))}
+          </select>
+          {selectedShift && (
+            <p className="text-xs text-gray-500 mt-1">
+              Showing data for {selectedShift.name} ({selectedShift.start_time.slice(0, 5)} - {selectedShift.end_time.slice(0, 5)})
+            </p>
+          )}
+          {!selectedShift && (
+            <p className="text-xs text-gray-500 mt-1">
+              Showing data for all 24 hours
+            </p>
+          )}
+        </div>
+      </div>
+
+      {/* Summary Metrics Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+        <div className="bg-white rounded-lg shadow p-6">
+          <h3 className="text-sm font-medium text-gray-500 mb-2">Active Sensor</h3>
+          <p className="text-2xl font-bold text-green-600">
+            {payloadReceived && sensors.some(s => s.isActive) ? sensors.filter(s => s.isActive).map(s => s.name).join(', ') : 'None'}
+          </p>
+        </div>
+        <div className="bg-white rounded-lg shadow p-6">
+          <h3 className="text-sm font-medium text-gray-500 mb-2">Total Switches</h3>
+          <p className="text-2xl font-bold text-blue-600">{summaryMetrics.switchCount}</p>
+          <p className="text-xs text-gray-500 mt-1">
+            {getCurrentActiveShift
+              ? `During ${getCurrentActiveShift.name}`
+              : selectedShift
+                ? `During ${selectedShift.name}`
+                : 'In last 24 hours'}
+          </p>
+        </div>
+        <div className="bg-white rounded-lg shadow p-6">
+          <h3 className="text-sm font-medium text-gray-500 mb-2">Total Sensors</h3>
+          <p className="text-2xl font-bold text-purple-600">{sensors.length}</p>
+        </div>
+      </div>
+
+      {/* Timeline Chart */}
+      <div className="bg-white rounded-lg shadow p-6 mb-8">
+        <h2 className="text-xl font-bold mb-4">
+          {selectedShift ? `${selectedShift.name} Sensor Activity Timeline` : 'Sensor Activity Timeline'}
+        </h2>
+        {selectedShift ? (
+          timelineBarData.length > 0 || timelineData.length > 0 ? (
+            <div className="w-full" style={{ minHeight: `${Math.max(200, sensors.length * 50)}px` }}>
+
+
+
+
+              {/* Re-implementing with numerical Y-axis for precise ReferenceArea control */}
+              <ResponsiveContainer width="100%" height={Math.max(200, sensors.length * 60)}>
+                <ComposedChart
+                  layout="vertical"
+                  data={sensors.map((s, i) => ({ name: s.name, index: i }))}
+                  margin={{ top: 20, right: 30, left: 100, bottom: 20 }}
+                >
+                  <CartesianGrid strokeDasharray="3 3" horizontal={true} vertical={true} />
+                  <XAxis
+                    type="number"
+                    domain={(dataMin, dataMax) => {
+                      const [startHour, startMin] = selectedShift.start_time.slice(0, 5).split(':').map(Number);
+                      const [endHour, endMin] = selectedShift.end_time.slice(0, 5).split(':').map(Number);
+                      const shiftStartMinutes = startHour * 60 + startMin;
+                      let shiftEndMinutes = endHour * 60 + endMin;
+                      const isOvernight = shiftEndMinutes <= shiftStartMinutes;
+                      if (isOvernight) shiftEndMinutes += (24 * 60);
+                      return [shiftStartMinutes, shiftEndMinutes];
+                    }}
+                    tickFormatter={(value) => {
+                      let hours = Math.floor(value / 60);
+                      const mins = Math.floor(value % 60);
+                      if (hours >= 24) hours = hours % 24;
+                      return `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}`;
+                    }}
+                    height={50}
+                  />
+                  <YAxis
+                    type="number"
+                    domain={[0, sensors.length]}
+                    ticks={sensors.map((s, i) => i + 0.5)} // Tick in middle of band
+                    tickFormatter={(val) => {
+                      const idx = Math.floor(val);
+                      return sensors[idx] ? sensors[idx].name : '';
+                    }}
+                    width={80}
+                    interval={0}
+                    reversed={true} // Top to bottom
+                  />
+                  <Tooltip content={<TimelineBarTooltip />} />
+
+                  {/* Background rows for readability */}
+                  {sensors.map((s, i) => (
+                    <ReferenceArea
+                      key={`bg-${i}`}
+                      y1={i}
+                      y2={i + 1}
+                      x1={selectedShift ? (parseInt(selectedShift.start_time.split(':')[0]) * 60 + parseInt(selectedShift.start_time.split(':')[1])) : 0}
+                      x2={selectedShift ? (parseInt(selectedShift.end_time.split(':')[0]) * 60 + parseInt(selectedShift.end_time.split(':')[1])) + (selectedShift.end_time <= selectedShift.start_time ? 1440 : 0) : 1440}
+                      fill={i % 2 === 0 ? "#f9fafb" : "#ffffff"}
+                      stroke="none"
+                      ifOverflow="extendDomain"
+                    />
+                  ))}
+
+                  {timelineBarData.map((bar, index) => (
+                    <ReferenceArea
+                      key={`seg-${index}`}
+                      y1={bar.sensorIndex + 0.15} // Padding top
+                      y2={bar.sensorIndex + 0.85} // Padding bottom
+                      x1={bar.start}
+                      x2={bar.end}
+                      fill={bar.color}
+                      stroke="none"
+                    />
+                  ))}
+                </ComposedChart>
+              </ResponsiveContainer>
+            </div>
+          ) : (
+            <div className="flex items-center justify-center h-40 text-gray-500">
+              <p className="text-sm">No data available for this shift.</p>
+            </div>
+          )
+        ) : (
+          <div className="flex items-center justify-center h-96 text-gray-500">
+            <div className="text-center">
+              <p className="text-lg font-semibold mb-2">Please Select a Shift</p>
+              <p className="text-sm">Select a shift from the dropdown above to view the timeline chart.</p>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Duration Distribution Donut Chart */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+        <div className="bg-white rounded-lg shadow p-6">
+          <h2 className="text-xl font-bold mb-4">Total On Duration Distribution</h2>
+          {summaryMetrics.chartData.length > 0 && summaryMetrics.chartData.some(d => d.value > 0) ? (
+            <ResponsiveContainer width="100%" height={300}>
+              <PieChart>
+                <Pie
+                  data={summaryMetrics.chartData}
+                  cx="50%"
+                  cy="50%"
+                  labelLine={false}
+                  label={({ name, percentage }) => `${name}: ${percentage}%`}
+                  outerRadius={100}
+                  innerRadius={60}
+                  fill="#8884d8"
+                  dataKey="value"
+                >
+                  {summaryMetrics.chartData.map((entry, index) => (
+                    <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                  ))}
+                </Pie>
+                <Tooltip
+                  formatter={(value) => {
+                    const hours = Math.floor(value / 60);
+                    const mins = value % 60;
+                    return `${hours}h ${mins}m`;
+                  }}
+                />
+              </PieChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="flex items-center justify-center h-72 text-gray-500">
+              <p className="text-sm">No duration data available</p>
+            </div>
+          )}
+        </div>
+
+        {/* Detailed Duration Table */}
+        <div className="bg-white rounded-lg shadow p-6">
+          <h2 className="text-xl font-bold mb-4">Sensor Duration Details</h2>
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-gray-200">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Sensor</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Duration</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Percentage</th>
+                </tr>
+              </thead>
+              <tbody className="bg-white divide-y divide-gray-200">
+                {sensors.map((sensor) => {
+                  const duration = summaryMetrics.durations[sensor.name] || {
+                    hours: 0,
+                    minutes: 0,
+                    totalMinutes: 0,
+                    percentage: 0
+                  };
+                  return (
+                    <tr key={sensor.id} className="hover:bg-gray-50">
+                      <td className="px-4 py-3 whitespace-nowrap text-sm font-medium text-gray-900">
+                        {sensor.name}
+                      </td>
+                      <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-500">
+                        {duration.hours}h {duration.minutes}m
+                      </td>
+                      <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-500">
+                        <div className="flex items-center">
+                          <div className="w-24 bg-gray-200 rounded-full h-2 mr-2">
+                            <div
+                              className="bg-green-500 h-2 rounded-full transition-all duration-300"
+                              style={{ width: `${duration.percentage}%` }}
+                            />
+                          </div>
+                          <span>{duration.percentage.toFixed(1)}%</span>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default SwitchSensors;
+

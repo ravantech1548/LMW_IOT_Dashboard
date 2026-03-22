@@ -1,0 +1,79 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: iot-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: iot_dashboard
+      POSTGRES_USER: iotuser
+      POSTGRES_PASSWORD: iotpassword
+      TZ: Asia/Kolkata
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U iotuser -d iot_dashboard"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command: ["postgres", "-c", "timezone=Asia/Kolkata"]
+    networks:
+      - iot-network
+
+  # Mosquitto service is optional if using external broker (140.245.50.20)
+  mosquitto:
+    image: eclipse-mosquitto:latest
+    container_name: iot-mosquitto
+    restart: always
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - mosquitto_data:/mosquitto/data
+    networks:
+      - iot-network
+
+  backend:
+    image: ravantech159/iot-backend_v1:latest
+    container_name: iot-backend_v1
+    restart: always
+    ports:
+      - "5000:5000"
+    environment:
+      DATABASE_URL: postgresql://iotuser:iotpassword@postgres:5432/iot_dashboard
+      MQTT_BROKER_URL: mqtt://140.245.50.20:1883
+      MQTT_USERNAME: iot-sense
+      MQTT_PASSWORD: 'Tech2026*'
+      MQTT_TOPIC: voltas
+      JWT_SECRET: your-super-secret-jwt-key-change-in-production
+      JWT_EXPIRES_IN: 7d
+      NODE_ENV: production
+      DB_SSL: 'false'
+      TZ: Asia/Kolkata
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - iot-network
+
+  frontend:
+    image: ravantech159/iot-frontend_v1:latest
+    container_name: iot-frontend_v1
+    restart: always
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - iot-network
+
+volumes:
+  postgres_data:
+  mosquitto_data:
+
+networks:
+  iot-network:
+    driver: bridge
