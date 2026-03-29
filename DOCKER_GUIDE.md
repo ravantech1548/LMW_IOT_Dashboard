@@ -55,183 +55,165 @@ To stop and remove volumes (WARNING: deletes database data):
 docker-compose down -v
 ```
 
-## 3. Building and Pushing to Docker Hub
+## 3. Step-by-Step: Build Process (Source / Development Environment)
 
-If you want to deploy to a remote server, you need to push your images to a registry like Docker Hub.
+This section explains how to compile your code and generate the Docker images for deployment on **any** target machine (Intel or ARM). You perform these steps on your development machine (e.g., your Windows PC where the source code lives).
 
 ### Step 1: Login to Docker Hub
+Ensure your development computer is connected to Docker Hub:
 ```powershell
 docker login
 ```
 
-### Step 2: Build the Images
-If you haven't already:
+### Step 2: Configure the Scripts (Optional)
+By default, the scripts are configured to push to the `ravantech159` Docker Hub namespace. Open `build-multiarch.bat` (or `.sh`) in a text editor to change the `DOCKER_USERNAME` to your own hub username if needed.
+
+### Step 3: Run the Build & Push Automator
+This single command handles compiling the frontend, backend, and retagging Postgres/Mosquitto into your registry for both Intel (`linux/amd64`) and ARM (`linux/arm64`).
+
+**On Windows:**
 ```powershell
-docker-compose build
+.\build-multiarch.bat
 ```
 
-### Step 3: Tag the Images
-Docker Compose typically names images as `projectname-servicename`. You must duplicate these with your Docker Hub username.
-
-**Check your local image names:**
-```powershell
-docker images
+**On Linux / UNIX / Mac:**
+```bash
+chmod +x build-multiarch.sh
+./build-multiarch.sh
 ```
 
-**Run the tag commands (Replace `ravantech159` with your username):**
-```powershell
-# Tag Backend
-docker tag voltas_iot_dashboard-main-backend ravantech159/iot-backend:latest
+**What this script does behind the scenes:**
+1. Initializes a cross-compilation builder using `docker buildx`.
+2. Compiles `lmw_iot_backend` natively for ARM & Intel, then pushes to Docker Hub.
+3. Compiles `lmw_iot-frontend` natively for ARM & Intel, then pushes to Docker Hub.
+4. Creates multi-arch manifests for `lmw_iot-postgres` and `lmw_iot-mosquitto` inside your repository.
 
-# Tag Frontend
-docker tag voltas_iot_dashboard-main-frontend ravantech159/iot-frontend:latest
-```
-*(Note: If `voltas_iot_dashboard-main-backend` doesn't exist, try `voltas_iot_dashboard-main_backend` with an underscore)*
-
-### Step 4: Push to Docker Hub
-```powershell
-docker push ravantech159/iot-backend:latest
-docker push ravantech159/iot-frontend:latest
-```
+**Once the script finishes successfully, your images are globally accessible via Docker Hub!**
 
 ---
 
-## 4. Deploying to an Ubuntu Server (ARM Processor)
+## 4. Step-by-Step: Deploy at Target Machine (Production / Edge Device)
 
-These steps work for standard Ubuntu servers and ARM-based devices (like Raspberry Pi or AWS Graviton).
+These steps are executed strictly on the physical target server where the software will run. Because you used the multi-arch build script in Section 3, Docker will automatically download the correct architecture (Intel vs ARM / Raspberry Pi / AWS Graviton) with zero extra configuration.
 
-### A. Pre-requisites on the Server
-1.  **Install Docker & Docker Compose:**
-    ```bash
-    sudo apt-get update
-    sudo apt-get install -y docker.io docker-compose
-    ```
-2.  **Ensure User Permissions:**
-    ```bash
-    sudo usermod -aG docker $USER
-    # You may need to logout and login again
-    ```
-
-### B. Setup the Application
-1.  **Create a folder:**
-    ```bash
-    mkdir iot-dashboard
-    cd iot-dashboard
-    ```
-
-
-2.  **Create `docker-compose.yml`:**
-    
-    You need to copy the content of the **Production Docker Compose** file to your server. 
-    
-    **Option A: Copy file manually**
-    Copy the `docker-compose.prod.yml` content from your local machine and paste it into a file named `docker-compose.yml` on the server.
-
-    **Option B: Copy-Paste Content**
-    Run `nano docker-compose.yml` on the server and paste the following content (which uses the pre-built images):
-
-    ```yaml
-    version: '3.8'
-
-    services:
-      postgres:
-        image: postgres:15-alpine
-        container_name: iot-postgres
-        restart: always
-        environment:
-          POSTGRES_DB: iot_dashboard
-          POSTGRES_USER: iotuser
-          POSTGRES_PASSWORD: iotpassword
-          TZ: Asia/Singapore
-        ports:
-          - "5432:5432"
-        volumes:
-          - postgres_data:/var/lib/postgresql/data
-        healthcheck:
-          test: ["CMD-SHELL", "pg_isready -U iotuser -d iot_dashboard"]
-          interval: 10s
-          timeout: 5s
-          retries: 5
-        command: ["postgres", "-c", "timezone=Asia/Singapore"]
-        networks:
-          - iot-network
-
-      mosquitto:
-        image: eclipse-mosquitto:latest
-        container_name: iot-mosquitto
-        restart: always
-        ports:
-          - "1883:1883"
-          - "9001:9001"
-        volumes:
-          - mosquitto_data:/mosquitto/data
-        networks:
-          - iot-network
-
-      backend:
-        image: ravantech159/iot-backend:latest
-        container_name: iot-backend
-        restart: always
-        ports:
-          - "5000:5000"
-        environment:
-          DATABASE_URL: postgresql://iotuser:iotpassword@postgres:5432/iot_dashboard
-          MQTT_BROKER_URL: mqtts://9213530428624354bfc54e44a2a16413.s1.eu.hivemq.cloud:8883
-          MQTT_USERNAME: iot-sense
-          MQTT_PASSWORD: 'Tech2026*'
-          MQTT_TOPIC: voltas
-          JWT_SECRET: your-super-secret-jwt-key-change-in-production
-          JWT_EXPIRES_IN: 7d
-          NODE_ENV: production
-          DB_SSL: 'false'
-          TZ: Asia/Singapore
-        depends_on:
-          postgres:
-            condition: service_healthy
-          mosquitto:
-            condition: service_started
-        networks:
-          - iot-network
-
-      frontend:
-        image: ravantech159/iot-frontend:latest
-        container_name: iot-frontend
-        restart: always
-        ports:
-          - "80:80"
-        depends_on:
-          - backend
-        networks:
-          - iot-network
-
-    volumes:
-      postgres_data:
-      mosquitto_data:
-
-    networks:
-      iot-network:
-        driver: bridge
-    ```
-
-3.  **Deploy:**
-    ```bash
-    sudo docker-compose up -d
-    ```
-
-### C. ARM Architecture Note
-If you built the images on Windows (x64), they are likely `linux/amd64` architecture.
-- **Newer ARM devices (like Raspberry Pi 5 or AWS Graviton 3):** Docker can often run x64 images using emulation, but it might be slower.
-- **If it fails:** You need to build multi-architecture images from your Windows machine using `docker buildx`.
-
-**To build specifically for ARM from Windows:**
-```powershell
-# Create a builder instance
-docker buildx create --use
-
-# Build and push directly for both AMD64 and ARM64
-docker buildx build --platform linux/amd64,linux/arm64 -t ravantech159/iot-backend:latest ./backend --push
-docker buildx build --platform linux/amd64,linux/arm64 -t ravantech159/iot-frontend:latest --build-arg REACT_APP_API_URL=/api --build-arg REACT_APP_WS_URL=/ ./frontend --push
+### Step 1: Prepare the Target Server
+Log in to your target machine (via SSH or physical terminal). Ensure Docker and Docker Compose are installed:
+```bash
+sudo apt-get update
+sudo apt-get install -y docker.io docker-compose
+sudo usermod -aG docker $USER
 ```
+*(You may need to logout and log back into the server for group changes to take effect).*
+
+### Step 2: Create Deployment Folder
+```bash
+mkdir iot-dashboard
+cd iot-dashboard
+```
+
+### Step 3: Copy `docker-compose.yml`
+You only need **ONE** file on the target server. Create the `docker-compose.yml` file:
+```bash
+nano docker-compose.yml
+```
+Then paste the production standard compose content. This assumes you are using the exact names defined in the earlier build process:
+
+```yaml
+version: '3.8'
+
+services:
+  postgres:
+    image: ravantech159/lmw_iot-postgres:latest
+    container_name: lmw_iot-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: iot_dashboard
+      POSTGRES_USER: iotuser
+      POSTGRES_PASSWORD: iotpassword
+      TZ: Asia/Kolkata
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U iotuser -d iot_dashboard"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - iot-network
+
+  mosquitto:
+    image: ravantech159/lmw_iot-mosquitto:latest
+    container_name: lmw_iot-mosquitto
+    restart: always
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - mosquitto_data:/mosquitto/data
+    networks:
+      - iot-network
+
+  backend:
+    image: ravantech159/lmw_iot_backend:latest
+    container_name: lmw_iot_backend
+    restart: always
+    ports:
+      - "5000:5000"
+    environment:
+      DATABASE_URL: postgresql://iotuser:iotpassword@postgres:5432/iot_dashboard
+      MQTT_BROKER_URL: mqtt://140.245.50.20:1883
+      MQTT_USERNAME: iot-sense
+      MQTT_PASSWORD: 'Tech2026*'
+      MQTT_TOPIC: 'iot/#'
+      JWT_SECRET: your-super-secret-jwt-key-change-in-production
+      JWT_EXPIRES_IN: 7d
+      NODE_ENV: production
+      DB_SSL: 'false'
+      TZ: Asia/Kolkata
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - iot-network
+
+  frontend:
+    image: ravantech159/lmw_iot-frontend:latest
+    container_name: lmw_iot-frontend
+    restart: always
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - iot-network
+
+volumes:
+  postgres_data:
+  mosquitto_data:
+
+networks:
+  iot-network:
+    driver: bridge
+```
+
+### Step 4: Pull and Start Services
+Tell the target machine to download your newly published images directly from Docker Hub and start your entire stack in the background:
+```bash
+# Pull the latest multi-architecture images
+sudo docker-compose pull
+
+# Spin up the infrastructure in detached mode
+sudo docker-compose up -d
+```
+
+### Step 5: Verify the Deployment
+To ensure everything is functioning correctly on the target machine:
+```bash
+sudo docker-compose ps
+```
+You can now access your production frontend by pointing your web browser to the target machine's IP address!
 
 ## 5. Troubleshooting
 

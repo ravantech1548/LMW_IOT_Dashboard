@@ -11,6 +11,13 @@ const Reports = () => {
   const [reportData, setReportData] = useState([]);
   const [shifts, setShifts] = useState([]);
 
+  // Device Report States
+  const [reportType, setReportType] = useState('status'); // 'status' or 'device'
+  const [devices, setDevices] = useState([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState('');
+  const [deviceReportData, setDeviceReportData] = useState([]);
+  const [deviceColumns, setDeviceColumns] = useState([]); // Dynamic columns p1, p2...
+
   // Filter states
   const [dateFilter, setDateFilter] = useState('today'); // today, lastweek, currentmonth, custom
   const [startDate, setStartDate] = useState('');
@@ -22,13 +29,17 @@ const Reports = () => {
   useEffect(() => {
     fetchSensors();
     fetchShifts();
+    fetchDevices();
   }, []);
 
   useEffect(() => {
-    if (sensors.length > 0) {
+    if (reportType === 'status' && sensors.length > 0) {
       fetchReportData();
+    } else if (reportType === 'device' && selectedDeviceId) {
+      fetchDeviceReportData();
     }
-  }, [sensors, dateFilter, startDate, endDate, startTime, endTime, selectedShiftId, timezone]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reportType, selectedDeviceId, sensors, dateFilter, startDate, endDate, startTime, endTime, selectedShiftId, timezone]);
 
   const fetchSensors = async () => {
     try {
@@ -54,6 +65,18 @@ const Reports = () => {
       setShifts(response.data.filter(s => s.is_active));
     } catch (error) {
       console.error('Error fetching shifts:', error);
+    }
+  };
+
+  const fetchDevices = async () => {
+    try {
+      const response = await api.get('/channel-mappings/devices');
+      setDevices(response.data || []);
+      if (response.data && response.data.length > 0) {
+        setSelectedDeviceId(response.data[0].device_id);
+      }
+    } catch (error) {
+      console.error('Error fetching devices:', error);
     }
   };
 
@@ -256,95 +279,220 @@ const Reports = () => {
     }
   };
 
+  const fetchDeviceReportData = async () => {
+    if (!selectedDeviceId) return;
+
+    setLoading(true);
+    try {
+      const dateRange = getDateRange();
+      if (!dateRange) {
+        setDeviceReportData([]);
+        setLoading(false);
+        return;
+      }
+
+      let { start, end } = dateRange;
+
+      if (startTime) {
+        const [hour, min] = startTime.split(':').map(Number);
+        start.setHours(hour, min, 0, 0);
+      }
+      if (endTime) {
+        const [hour, min] = endTime.split(':').map(Number);
+        end.setHours(hour, min, 59, 999);
+      }
+
+      const response = await api.get(`/data/device-reports/${selectedDeviceId}`, {
+        params: {
+          start_time: start.toISOString(),
+          end_time: end.toISOString(),
+          limit: 100000 
+        }
+      });
+
+      let rawData = response.data || [];
+      
+      const portRegex = /^p\d+$/;
+      const activeCols = new Set();
+      
+      rawData.forEach(item => {
+        Object.keys(item).forEach(key => {
+          if (portRegex.test(key) && item[key] !== null) {
+            activeCols.add(key);
+          }
+        });
+      });
+      
+      const sortedCols = Array.from(activeCols).sort((a, b) => parseInt(a.substring(1)) - parseInt(b.substring(1)));
+      setDeviceColumns(sortedCols);
+
+      let timelineArray = rawData.map(item => {
+        const time = new Date(item.timestamp);
+        
+        const dateStr = new Intl.DateTimeFormat('en-CA', {
+          timeZone: timezone
+        }).format(time);
+
+        const timeStr = time.toLocaleTimeString('en-US', {
+          hour12: false,
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          timeZone: timezone
+        });
+        
+        return {
+          ...item,
+          timestamp: time,
+          date: dateStr,
+          time: timeStr
+        };
+      });
+
+      if (selectedShiftId !== 'all') {
+        const selectedShift = shifts.find(s => s.id === parseInt(selectedShiftId));
+        if (selectedShift) {
+          timelineArray = filterDataByShift(timelineArray, selectedShift);
+        }
+      }
+
+      setDeviceReportData(timelineArray);
+    } catch (error) {
+      console.error('Error fetching device report data:', error);
+      setDeviceReportData([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   // Export to CSV
   const exportToCSV = () => {
-    if (reportData.length === 0) {
-      alert('No data to export');
-      return;
+    if (reportType === 'status') {
+      if (reportData.length === 0) {
+        alert('No data to export');
+        return;
+      }
+
+      const headers = ['Serial Number', 'Date', 'Time', 'Live Status', ...sensors.map(s => s.name)];
+
+      const rows = reportData.map((row, index) => {
+        const status = row.liveStatus || 'live';
+        const liveStatus = status === 'live' ? 'Live' : status === 'offline' ? 'Offline' : 'Unknown';
+        const values = [
+          index + 1,
+          row.date,
+          row.time,
+          liveStatus,
+          ...sensors.map(s => {
+            const value = row[s.name];
+            if (value === null || value === undefined) return '';
+            return value === 1 ? 'On' : value === 0 ? 'Off' : '';
+          })
+        ];
+        return values.join(',');
+      });
+
+      const csvContent = [headers.join(','), ...rows].join('\n');
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const link = document.createElement('a');
+      const url = URL.createObjectURL(blob);
+      link.setAttribute('href', url);
+      link.setAttribute('download', `sensor_report_${new Date().toISOString().split('T')[0]}.csv`);
+      link.style.visibility = 'hidden';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    } else {
+      if (deviceReportData.length === 0) {
+        alert('No data to export');
+        return;
+      }
+
+      const headers = ['Serial Number', 'Date', 'Time', ...deviceColumns.map(c => c.toUpperCase())];
+
+      const rows = deviceReportData.map((row, index) => {
+        const values = [
+          index + 1,
+          row.date,
+          row.time,
+          ...deviceColumns.map(c => row[c] !== null ? row[c] : '')
+        ];
+        return values.join(',');
+      });
+
+      const csvContent = [headers.join(','), ...rows].join('\n');
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const link = document.createElement('a');
+      const url = URL.createObjectURL(blob);
+      link.setAttribute('href', url);
+      link.setAttribute('download', `device_report_${selectedDeviceId}_${new Date().toISOString().split('T')[0]}.csv`);
+      link.style.visibility = 'hidden';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
     }
-
-    // CSV headers
-    const headers = ['Serial Number', 'Date', 'Time', 'Live Status', ...sensors.map(s => s.name)];
-
-    // CSV rows
-    const rows = reportData.map((row, index) => {
-      const status = row.liveStatus || 'live'; // Default to 'live' if not set
-      const liveStatus = status === 'live' ? 'Live' : status === 'offline' ? 'Offline' : 'Unknown';
-      const values = [
-        index + 1, // Serial number
-        row.date,
-        row.time,
-        liveStatus, // Live Status
-        ...sensors.map(s => {
-          const value = row[s.name];
-          if (value === null || value === undefined) return '';
-          return value === 1 ? 'On' : value === 0 ? 'Off' : '';
-        })
-      ];
-      return values.join(',');
-    });
-
-    // Combine headers and rows
-    const csvContent = [headers.join(','), ...rows].join('\n');
-
-    // Create blob and download
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement('a');
-    const url = URL.createObjectURL(blob);
-    link.setAttribute('href', url);
-    link.setAttribute('download', `sensor_report_${new Date().toISOString().split('T')[0]}.csv`);
-    link.style.visibility = 'hidden';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
   };
 
   // Export to Excel
   const exportToExcel = () => {
-    if (reportData.length === 0) {
-      alert('No data to export');
-      return;
+    if (reportType === 'status') {
+      if (reportData.length === 0) {
+        alert('No data to export');
+        return;
+      }
+
+      const headers = ['Serial Number', 'Date', 'Time', 'Live Status', ...sensors.map(s => s.name)];
+
+      const rows = reportData.map((row, index) => {
+        const status = row.liveStatus || 'live';
+        const liveStatus = status === 'live' ? 'Live' : status === 'offline' ? 'Offline' : 'Unknown';
+        return [
+          index + 1,
+          row.date,
+          row.time,
+          liveStatus,
+          ...sensors.map(s => {
+            const value = row[s.name];
+            if (value === null || value === undefined) return '';
+            return value === 1 ? 'On' : value === 0 ? 'Off' : '';
+          })
+        ];
+      });
+
+      const worksheet = XLSX.utils.aoa_to_sheet([headers, ...rows]);
+      const columnWidths = [{ wch: 12 }, { wch: 12 }, { wch: 10 }, { wch: 12 }, ...sensors.map(() => ({ wch: 10 }))];
+      worksheet['!cols'] = columnWidths;
+
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, 'Sensor Status Report');
+      const fileName = `sensor_report_${new Date().toISOString().split('T')[0]}.xlsx`;
+      XLSX.writeFile(workbook, fileName);
+    } else {
+      if (deviceReportData.length === 0) {
+        alert('No data to export');
+        return;
+      }
+
+      const headers = ['Serial Number', 'Date', 'Time', ...deviceColumns.map(c => c.toUpperCase())];
+
+      const rows = deviceReportData.map((row, index) => {
+        return [
+          index + 1,
+          row.date,
+          row.time,
+          ...deviceColumns.map(c => row[c] !== null ? Number(row[c]).toFixed(2) : '')
+        ];
+      });
+
+      const worksheet = XLSX.utils.aoa_to_sheet([headers, ...rows]);
+      const columnWidths = [{ wch: 12 }, { wch: 12 }, { wch: 10 }, ...deviceColumns.map(() => ({ wch: 10 }))];
+      worksheet['!cols'] = columnWidths;
+
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, 'Device Port Report');
+      const fileName = `device_report_${selectedDeviceId}_${new Date().toISOString().split('T')[0]}.xlsx`;
+      XLSX.writeFile(workbook, fileName);
     }
-
-    // Prepare worksheet data
-    const headers = ['Serial Number', 'Date', 'Time', 'Live Status', ...sensors.map(s => s.name)];
-
-    const rows = reportData.map((row, index) => {
-      const status = row.liveStatus || 'live'; // Default to 'live' if not set
-      const liveStatus = status === 'live' ? 'Live' : status === 'offline' ? 'Offline' : 'Unknown';
-      return [
-        index + 1, // Serial number
-        row.date,
-        row.time,
-        liveStatus, // Live Status
-        ...sensors.map(s => {
-          const value = row[s.name];
-          if (value === null || value === undefined) return '';
-          return value === 1 ? 'On' : value === 0 ? 'Off' : '';
-        })
-      ];
-    });
-
-    // Create workbook and worksheet
-    const worksheet = XLSX.utils.aoa_to_sheet([headers, ...rows]);
-
-    // Set column widths
-    const columnWidths = [
-      { wch: 12 }, // Serial Number
-      { wch: 12 }, // Date
-      { wch: 10 }, // Time
-      { wch: 12 }, // Live Status
-      ...sensors.map(() => ({ wch: 10 })) // Sensor columns
-    ];
-    worksheet['!cols'] = columnWidths;
-
-    // Create workbook
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'Sensor Status Report');
-
-    // Generate Excel file and download
-    const fileName = `sensor_report_${new Date().toISOString().split('T')[0]}.xlsx`;
-    XLSX.writeFile(workbook, fileName);
   };
 
   return (
@@ -352,6 +500,30 @@ const Reports = () => {
       <div className="mb-6">
         <h1 className="text-3xl font-bold mb-2">Reports & Analytics</h1>
         <p className="text-gray-600">Historical data visualization and export</p>
+      </div>
+
+      {/* Tabs */}
+      <div className="flex border-b border-gray-200 mb-6 bg-white rounded-t-lg px-6 pt-4">
+        <button
+          className={`py-3 px-6 font-medium text-sm transition-colors border-b-2 ${
+            reportType === 'status'
+              ? 'border-blue-500 text-blue-600 bg-blue-50/30'
+              : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 hover:bg-gray-50'
+          }`}
+          onClick={() => setReportType('status')}
+        >
+          Sensor Status Report
+        </button>
+        <button
+          className={`py-3 px-6 font-medium text-sm transition-colors border-b-2 ${
+            reportType === 'device'
+              ? 'border-blue-500 text-blue-600 bg-blue-50/30'
+              : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 hover:bg-gray-50'
+          }`}
+          onClick={() => setReportType('device')}
+        >
+          Device Format Port Report
+        </button>
       </div>
 
       {/* Filters */}
@@ -452,6 +624,26 @@ const Reports = () => {
               ))}
             </select>
           </div>
+
+          {/* Device Selection (Only for Device Report) */}
+          {reportType === 'device' && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Device ID
+              </label>
+              <select
+                value={selectedDeviceId}
+                onChange={(e) => setSelectedDeviceId(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
+              >
+                {devices.map(device => (
+                  <option key={device.device_id} value={device.device_id}>
+                    {device.device_id}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
         </div>
 
         {/* Export Buttons */}
@@ -470,27 +662,26 @@ const Reports = () => {
           >
             Export to Excel
           </button>
-          {reportData.length > 0 && (
-            <span className="px-4 py-2 text-gray-600">
-              {reportData.length} records found
-            </span>
-          )}
+          
+          <span className="px-4 py-2 text-gray-600">
+            {reportType === 'status' ? reportData.length : deviceReportData.length} records found
+          </span>
         </div>
       </div>
 
       {/* Report Table */}
       <div className="bg-white rounded-lg shadow p-6">
-        <h2 className="text-xl font-bold mb-4">Sensor Status Report</h2>
+        <h2 className="text-xl font-bold mb-4">{reportType === 'status' ? 'Sensor Status Report' : 'Device Format Port Report'}</h2>
         {loading ? (
           <div className="text-center py-8">
-            <div className="text-lg">Loading report data...</div>
+            <div className="text-lg text-gray-500">Loading report data...</div>
           </div>
-        ) : reportData.length === 0 ? (
+        ) : (reportType === 'status' && reportData.length === 0) || (reportType === 'device' && deviceReportData.length === 0) ? (
           <div className="text-center py-8 text-gray-500">
             <p>No data available for the selected filters.</p>
             <p className="text-sm mt-2">Try adjusting your filter criteria.</p>
           </div>
-        ) : (
+        ) : reportType === 'status' ? (
           <div className="overflow-x-auto">
             <table className="min-w-full divide-y divide-gray-200">
               <thead className="bg-gray-50">
@@ -559,6 +750,54 @@ const Reports = () => {
                       return (
                         <td key={sensor.id} className={`px-4 py-3 whitespace-nowrap text-sm text-center ${bgColor} ${textColor} font-medium`}>
                           {status}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-gray-200">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider sticky left-0 bg-gray-50 z-10 w-16">
+                    S.No
+                  </th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider sticky left-16 bg-gray-50 z-10">
+                    Date
+                  </th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider sticky left-44 bg-gray-50 z-10">
+                    Time
+                  </th>
+                  {deviceColumns.map(col => (
+                    <th key={col} className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider border-l border-gray-200">
+                      {col.toUpperCase()}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="bg-white divide-y divide-gray-200">
+                {deviceReportData.map((row, index) => (
+                  <tr key={index} className="hover:bg-gray-50">
+                    <td className="px-4 py-3 whitespace-nowrap text-sm font-medium text-gray-900 sticky left-0 bg-white z-10">
+                      {index + 1}
+                    </td>
+                    <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-900 sticky left-16 bg-white z-10">
+                      {row.date}
+                    </td>
+                    <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-900 sticky left-44 bg-white z-10 border-r border-gray-100">
+                      {row.time}
+                    </td>
+                    {deviceColumns.map(col => {
+                      const value = row[col];
+                      const isEmpty = value === null || value === undefined;
+                      
+                      return (
+                        <td key={col} className={`px-4 py-3 whitespace-nowrap text-sm text-center border-l border-gray-100 font-mono ${isEmpty ? 'text-gray-300' : 'text-blue-700 font-medium'}`}>
+                          {isEmpty ? '-' : Number(value).toFixed(2)}
                         </td>
                       );
                     })}

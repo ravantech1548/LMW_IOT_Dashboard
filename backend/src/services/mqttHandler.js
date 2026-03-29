@@ -641,6 +641,41 @@ const initializeMQTT = () => {
 
         // Update last payload time for offline detection
         deviceLastPayloadTime[deviceId] = timestamp;
+        
+        // --- NEW: Save raw interval snapshot into tabular device_interval_reports table ---
+        if (isInterval) {
+          try {
+            let columns = ['client_id', 'device_id', 'mac_id', 'firmware_ver', 'timestamp'];
+            let values = [clientId, deviceId, macId, firmwareVer, timestamp];
+            let placeholders = ['$1', '$2', '$3', '$4', '$5'];
+            let paramCount = 6;
+            
+            for (const [k, v] of Object.entries(data)) {
+              const key = k.toLowerCase();
+              if (key.match(/^p([1-9]|[1-2][0-9]|30)$/)) {
+                const num = parseFloat(v);
+                if (!isNaN(num)) {
+                  columns.push(key);
+                  values.push(num / count);
+                  placeholders.push(`$${paramCount++}`);
+                }
+              }
+            }
+            
+            const insertQuery = `
+              INSERT INTO device_interval_reports (${columns.join(', ')})
+              VALUES (${placeholders.join(', ')})
+              ON CONFLICT (device_id, timestamp) 
+              DO UPDATE SET firmware_ver = EXCLUDED.firmware_ver${columns.slice(5).length ? ', ' + columns.slice(5).map(c => `${c} = EXCLUDED.${c}`).join(', ') : ''}
+            `;
+            
+            await pool.query(insertQuery, values);
+            console.log(`📠 [Interval Report] Successfully saved tabular report for device ${deviceId} at ${timestamp.toISOString()}`);
+          } catch (reportErr) {
+            console.error(`❌ [Interval Report] Failed to save tabular report for ${deviceId}:`, reportErr.message);
+          }
+        }
+        // ---------------------------------------------------------------------------------
 
         // Process each key in the Data object
         for (const [rawKey, rawValue] of Object.entries(data)) {

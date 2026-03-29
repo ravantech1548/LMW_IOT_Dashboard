@@ -192,6 +192,23 @@ const ChannelMapping = () => {
         });
     };
 
+    const handleDeleteDevice = async () => {
+        if (!selectedDevice) return;
+        if (!window.confirm(`Are you sure you want to completely delete the device "${selectedDevice}", its sensors, and all its channel configs?`)) {
+            return;
+        }
+
+        try {
+            await api.delete(`/channel-mappings/device/${selectedDevice}`);
+            showNotification(`✅ Successfully deleted device "${selectedDevice}" along with its mappings.`);
+            setSelectedDevice('');
+            fetchDevices();
+        } catch (err) {
+            console.error('Error deleting device', err);
+            showNotification('Failed to delete device', 'error');
+        }
+    };
+
     const handleRemoveChannel = async (index) => {
         const ch = channels[index];
         if (ch.id) {
@@ -203,7 +220,15 @@ const ChannelMapping = () => {
                 return;
             }
         }
-        setChannels(prev => prev.filter((_, i) => i !== index));
+        
+        setChannels(prev => {
+            const nextChannels = prev.filter((_, i) => i !== index);
+            if (nextChannels.length === 0) {
+                fetchDevices();
+                setSelectedDevice('');
+            }
+            return nextChannels;
+        });
     };
 
     const handleSaveAll = async () => {
@@ -325,13 +350,21 @@ const ChannelMapping = () => {
                             Configuring Device: <code style={{ background: '#e2e8f0', padding: '2px 8px', borderRadius: '4px' }}>{selectedDevice}</code>
                         </span>
                         {isAdmin && (
-                            <button
-                                onClick={handleSaveAll}
-                                disabled={saving}
-                                style={{ ...btnStyle, background: saving ? '#94a3b8' : '#22c55e' }}
-                            >
-                                {saving ? '⏳ Saving...' : '💾 Save Configuration'}
-                            </button>
+                            <div style={{ display: 'flex', gap: '8px' }}>
+                                <button
+                                    onClick={handleDeleteDevice}
+                                    style={{ ...btnStyle, background: '#ef4444' }}
+                                >
+                                    🗑️ Delete Device
+                                </button>
+                                <button
+                                    onClick={handleSaveAll}
+                                    disabled={saving}
+                                    style={{ ...btnStyle, background: saving ? '#94a3b8' : '#22c55e' }}
+                                >
+                                    {saving ? '⏳ Saving...' : '💾 Save Configuration'}
+                                </button>
+                            </div>
                         )}
                     </div>
 

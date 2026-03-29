@@ -9,6 +9,7 @@ import Dashboard from './pages/Dashboard';
 import SwitchSensors from './pages/SwitchSensors';
 import Settings from './pages/Settings';
 import Reports from './pages/Reports';
+import Analytics from './pages/Analytics';
 import ChannelMapping from './pages/ChannelMapping';
 
 function App() {
@@ -64,6 +65,16 @@ function App() {
                 <ProtectedRoute>
                   <Layout>
                     <Reports />
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/analytics"
+              element={
+                <ProtectedRoute>
+                  <Layout>
+                    <Analytics />
                   </Layout>
                 </ProtectedRoute>
               }

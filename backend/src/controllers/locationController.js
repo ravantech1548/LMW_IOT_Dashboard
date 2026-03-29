@@ -58,10 +58,10 @@ const getLocationById = async (req, res, next) => {
 
 const createLocation = async (req, res, next) => {
   try {
-    const { department_id, name, floor_level, geo_coordinates } = req.body;
+    const { id, department_id, name, floor_level, geo_coordinates } = req.body;
 
-    if (!department_id || !name) {
-      return res.status(400).json({ error: 'Department ID and name are required' });
+    if (!id || !department_id || !name) {
+      return res.status(400).json({ error: 'Location ID, Department ID, and name are required' });
     }
 
     // Check authorization by verifying department's client_id
@@ -76,8 +76,8 @@ const createLocation = async (req, res, next) => {
     }
 
     const result = await pool.query(
-      'INSERT INTO locations (department_id, name, floor_level, geo_coordinates) VALUES ($1, $2, $3, $4) RETURNING *',
-      [department_id, name, floor_level || null, geo_coordinates || null]
+      'INSERT INTO locations (id, department_id, name, floor_level, geo_coordinates) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+      [id, department_id, name, floor_level || null, geo_coordinates || null]
     );
 
     res.status(201).json(result.rows[0]);
@@ -88,12 +88,12 @@ const createLocation = async (req, res, next) => {
 
 const updateLocation = async (req, res, next) => {
   try {
-    const { id } = req.params;
-    const { name, floor_level, geo_coordinates } = req.body;
+    const { id: oldId } = req.params;
+    const { id: newId, department_id, name, floor_level, geo_coordinates } = req.body;
 
     const locResult = await pool.query(
       'SELECT d.client_id FROM locations l JOIN departments d ON l.department_id = d.id WHERE l.id = $1',
-      [id]
+      [oldId]
     );
     
     if (locResult.rows.length === 0) {
@@ -104,9 +104,19 @@ const updateLocation = async (req, res, next) => {
       return res.status(403).json({ error: 'Access denied' });
     }
 
+    const targetId = newId || oldId;
+    
+    // Check if new ID already exists if changing ID
+    if (newId && newId !== oldId) {
+      const existingParams = await pool.query('SELECT id FROM locations WHERE id = $1', [newId]);
+      if (existingParams.rows.length > 0) {
+        return res.status(400).json({ error: 'New Location ID already exists' });
+      }
+    }
+
     const result = await pool.query(
-      'UPDATE locations SET name = $1, floor_level = $2, geo_coordinates = $3 WHERE id = $4 RETURNING *',
-      [name, floor_level || null, geo_coordinates || null, id]
+      'UPDATE locations SET id = $1, department_id = $2, name = $3, floor_level = $4, geo_coordinates = $5 WHERE id = $6 RETURNING *',
+      [targetId, department_id, name, floor_level || null, geo_coordinates || null, oldId]
     );
 
     res.json(result.rows[0]);
