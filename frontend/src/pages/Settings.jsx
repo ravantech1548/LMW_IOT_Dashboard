@@ -293,7 +293,7 @@ const Settings = () => {
       case 'departments':
         return { client_id: '', name: '', description: '' };
       case 'locations':
-        return { department_id: '', name: '', floor_level: '' };
+        return { id: '', department_id: '', name: '', floor_level: '' };
       case 'sensor-types':
         return { name: '', unit: '', description: '', min_value: '', max_value: '', widget_type: 'line_chart' };
       case 'shifts':
@@ -413,6 +413,18 @@ const Settings = () => {
 
           {activeTab === 'locations' && (
             <>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Location ID *</label>
+                <input
+                  type="text"
+                  required
+                  value={formData.id || ''}
+                  onChange={(e) => setFormData({ ...formData, id: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500"
+                  placeholder="e.g., LOC-01"
+                />
+              </div>
+
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Department *</label>
                 <select

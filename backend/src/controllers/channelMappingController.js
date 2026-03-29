@@ -62,6 +62,7 @@ const getDevices = async (req, res, next) => {
     const result = await pool.query(
       `SELECT d.id as device_id, d.client_id, d.asset_type, d.message_type 
        FROM devices d 
+       WHERE EXISTS (SELECT 1 FROM channel_mappings cm WHERE cm.device_id = d.id)
        ORDER BY d.id ASC`
     );
     // If there are mappings not yet in devices table
@@ -276,13 +277,21 @@ const deleteMapping = async (req, res, next) => {
   try {
     const { id } = req.params;
 
-    const result = await pool.query(
-      'DELETE FROM channel_mappings WHERE id = $1 RETURNING id',
-      [id]
-    );
-
-    if (result.rows.length === 0) {
+    const mappingInfo = await pool.query('SELECT device_id, sensor_id FROM channel_mappings WHERE id = $1', [id]);
+    if (mappingInfo.rows.length === 0) {
       return res.status(404).json({ error: 'Channel mapping not found' });
+    }
+    const { device_id, sensor_id } = mappingInfo.rows[0];
+
+    await pool.query('DELETE FROM channel_mappings WHERE id = $1', [id]);
+
+    if (sensor_id) {
+      await pool.query('DELETE FROM sensors WHERE id = $1', [sensor_id]);
+    }
+
+    const remaining = await pool.query('SELECT id FROM channel_mappings WHERE device_id = $1', [device_id]);
+    if (remaining.rows.length === 0) {
+      await pool.query('DELETE FROM devices WHERE id = $1', [device_id]);
     }
 
     res.json({ message: 'Channel mapping deleted successfully' });
@@ -298,13 +307,23 @@ const deleteMappingsForDevice = async (req, res, next) => {
   try {
     const { device_id } = req.params;
 
-    const result = await pool.query(
+    const mappingsResult = await pool.query(
       'DELETE FROM channel_mappings WHERE device_id = $1 RETURNING id',
       [device_id]
     );
 
+    const sensorsResult = await pool.query(
+      'DELETE FROM sensors WHERE device_id = $1 RETURNING id',
+      [device_id]
+    );
+
+    const deviceResult = await pool.query(
+      'DELETE FROM devices WHERE id = $1 RETURNING id',
+      [device_id]
+    );
+
     res.json({
-      message: `Deleted ${result.rows.length} mappings for device "${device_id}"`
+      message: `Deleted device "${device_id}" with ${mappingsResult.rows.length} mappings and ${sensorsResult.rows.length} sensors.`
     });
   } catch (error) {
     next(error);

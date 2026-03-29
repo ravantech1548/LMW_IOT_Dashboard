@@ -13,6 +13,7 @@ const Sidebar = ({ isOpen, onClose }) => {
     { path: '/channel-mapping', label: 'Channel Mapping', icon: '🔗', adminOnly: false },
     { path: '/settings', label: 'Settings', icon: '⚙️' },
     { path: '/reports', label: 'Reports', icon: '📈' },
+    { path: '/analytics', label: 'Analytics', icon: '⚡' },
   ].filter(item => !item.adminOnly || isAdmin);
 
   const isActive = (path) => location.pathname === path;

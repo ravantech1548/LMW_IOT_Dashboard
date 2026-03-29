@@ -165,9 +165,46 @@ const getAggregatedData = async (req, res, next) => {
   }
 };
 
+const getDeviceIntervalReports = async (req, res, next) => {
+  try {
+    const { device_id } = req.params;
+    const { start_time, end_time, limit = 1000 } = req.query;
+
+    if (!device_id) {
+      return res.status(400).json({ error: 'Device ID is required' });
+    }
+
+    let query = 'SELECT * FROM device_interval_reports WHERE device_id = $1';
+    const params = [device_id];
+    let paramCount = 2;
+
+    if (start_time) {
+      query += ` AND timestamp >= $${paramCount++}`;
+      params.push(start_time);
+    }
+
+    if (end_time) {
+      query += ` AND timestamp <= $${paramCount++}`;
+      params.push(end_time);
+    }
+
+    query += ` ORDER BY timestamp DESC LIMIT $${paramCount}`;
+    params.push(parseInt(limit));
+
+    const result = await pool.query(query, params);
+    
+    // Reverse the array to display older data as index 0 (S.No 1) matching chronological order expectations
+    res.json(result.rows.reverse());
+  } catch (error) {
+    console.error('❌ Error in getDeviceIntervalReports:', error);
+    next(error);
+  }
+};
+
 module.exports = {
   getSensorData,
   getLatestSensorData,
-  getAggregatedData
+  getAggregatedData,
+  getDeviceIntervalReports
 };
 

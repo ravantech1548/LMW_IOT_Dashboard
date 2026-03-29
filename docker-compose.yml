@@ -2,8 +2,8 @@ version: '3.8'
 
 services:
   postgres:
-    image: postgres:15-alpine
-    container_name: iot-postgres
+    image: ravantech159/lmw_iot-postgres:latest
+    container_name: lmw_iot-postgres
     restart: always
     environment:
       POSTGRES_DB: iot_dashboard
@@ -25,8 +25,8 @@ services:
 
   # Mosquitto service is optional if using external broker (140.245.50.20)
   mosquitto:
-    image: eclipse-mosquitto:latest
-    container_name: iot-mosquitto
+    image: ravantech159/lmw_iot-mosquitto:latest
+    container_name: lmw_iot-mosquitto
     restart: always
     ports:
       - "1883:1883"
@@ -37,8 +37,9 @@ services:
       - iot-network
 
   backend:
-    image: ravantech159/iot-backend_v1:latest
-    container_name: iot-backend_v1
+    build: ./backend
+    image: ravantech159/lmw_iot_backend:latest
+    container_name: lmw_iot_backend
     restart: always
     ports:
       - "5000:5000"
@@ -47,7 +48,7 @@ services:
       MQTT_BROKER_URL: mqtt://140.245.50.20:1883
       MQTT_USERNAME: iot-sense
       MQTT_PASSWORD: 'Tech2026*'
-      MQTT_TOPIC: voltas
+      MQTT_TOPIC: 'iot/#'
       JWT_SECRET: your-super-secret-jwt-key-change-in-production
       JWT_EXPIRES_IN: 7d
       NODE_ENV: production
@@ -60,11 +61,16 @@ services:
       - iot-network
 
   frontend:
-    image: ravantech159/iot-frontend_v1:latest
-    container_name: iot-frontend_v1
+    build:
+      context: ./frontend
+      args:
+        REACT_APP_API_URL: /api
+        REACT_APP_WS_URL: /
+    image: ravantech159/lmw_iot-frontend:latest
+    container_name: lmw_iot-frontend
     restart: always
     ports:
-      - "80:80"
+      - "8080:80"
     depends_on:
       - backend
     networks:

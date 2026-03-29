@@ -43,7 +43,7 @@ const initDatabase = async () => {
     // Create locations table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS locations (
-        id SERIAL PRIMARY KEY,
+        id VARCHAR(100) PRIMARY KEY,
         department_id INT REFERENCES departments(id) ON DELETE CASCADE,
         name VARCHAR(255) NOT NULL,
         floor_level VARCHAR(50),
@@ -65,11 +65,17 @@ const initDatabase = async () => {
       )
     `);
 
+    // Ensure widget_type exists
+    await pool.query(`
+      ALTER TABLE sensor_types 
+      ADD COLUMN IF NOT EXISTS widget_type VARCHAR(30) DEFAULT 'line_chart'
+    `);
+
     // Create sensors table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS sensors (
         id SERIAL PRIMARY KEY,
-        location_id INT REFERENCES locations(id) ON DELETE CASCADE,
+        location_id VARCHAR(100) REFERENCES locations(id) ON DELETE CASCADE ON UPDATE CASCADE,
         sensor_type_id INT REFERENCES sensor_types(id),
         name VARCHAR(255) NOT NULL,
         mqtt_topic VARCHAR(500) NOT NULL,
@@ -196,6 +202,29 @@ const initDatabase = async () => {
         ('heartbeat_interval_minutes', '15', 'How often to insert heartbeat records when sensor values haven''t changed'),
         ('timezone', 'Asia/Kolkata', 'System-wide timezone for date/time display (e.g. Asia/Kolkata, Asia/Singapore)')
       ON CONFLICT (setting_key) DO NOTHING
+    `);
+
+    // Create channel_mappings table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS channel_mappings (
+        id SERIAL PRIMARY KEY,
+        device_id VARCHAR(50) NOT NULL,
+        payload_key VARCHAR(20) NOT NULL,
+        sensor_id INT REFERENCES sensors(id) ON DELETE CASCADE,
+        alias VARCHAR(100),
+        data_mode VARCHAR(10) DEFAULT 'live',
+        interval_seconds INT DEFAULT 60,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE(device_id, payload_key)
+      )
+    `);
+
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_channel_mappings_device ON channel_mappings(device_id)
+    `);
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_channel_mappings_sensor ON channel_mappings(sensor_id)
     `);
 
     console.log('Database schema initialized successfully!');
