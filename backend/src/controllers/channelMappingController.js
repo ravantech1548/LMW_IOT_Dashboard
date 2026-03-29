@@ -65,16 +65,36 @@ const getDevices = async (req, res, next) => {
        WHERE EXISTS (SELECT 1 FROM channel_mappings cm WHERE cm.device_id = d.id)
        ORDER BY d.id ASC`
     );
-    // If there are mappings not yet in devices table
-    const backupResult = await pool.query(
-      `SELECT DISTINCT device_id FROM channel_mappings 
-       WHERE device_id NOT IN (SELECT id FROM devices)
-       ORDER BY device_id ASC`
-    );
+    
     const devices = result.rows;
-    backupResult.rows.forEach(r => {
-      devices.push({ device_id: r.device_id, client_id: null, asset_type: null, message_type: null });
+    const deviceIds = new Set(devices.map(d => d.device_id));
+
+    // Get devices from channel_mappings that aren't in devices table
+    const mappingResult = await pool.query(
+      `SELECT DISTINCT device_id FROM channel_mappings`
+    );
+    
+    mappingResult.rows.forEach(r => {
+      if (!deviceIds.has(r.device_id)) {
+        devices.push({ device_id: r.device_id, client_id: null, asset_type: null, message_type: null });
+        deviceIds.add(r.device_id);
+      }
     });
+
+    // Get raw devices from incoming mqtt interval payloads that have no mappings at all
+    const intervalResult = await pool.query(
+      `SELECT DISTINCT device_id FROM device_interval_reports`
+    );
+
+    intervalResult.rows.forEach(r => {
+      if (!deviceIds.has(r.device_id)) {
+        devices.push({ device_id: r.device_id, client_id: null, asset_type: null, message_type: null });
+        deviceIds.add(r.device_id);
+      }
+    });
+
+    // Sort devices logically for the UI dropdown
+    devices.sort((a, b) => a.device_id.localeCompare(b.device_id));
 
     res.json(devices);
   } catch (error) {
